@@ -21,6 +21,13 @@
  *   dump_regs_bin <path>       - Write 22 uint32s (R0-R15,PC,SR,PR,GBR,VBR,MACH) to binary file
  *   dump_mem_bin <addr> <sz> <path> - Write raw memory bytes to binary file
  *   pc_trace_frame <path>      - Trace all master CPU PCs for 1 frame to binary file
+ *   show_window                - Make the emulator window visible (for visual inspection)
+ *   hide_window                - Hide the emulator window again
+ *   step [N]                   - Step N CPU instructions then pause (default 1)
+ *   breakpoint <addr>          - Add PC breakpoint (hex address)
+ *   breakpoint_clear           - Remove all breakpoints
+ *   breakpoint_list            - List active breakpoints
+ *   continue                   - Resume execution (until next breakpoint or frame end)
  *
  * Part of mednafen-saturn-debug fork.
  */
@@ -36,6 +43,9 @@
 #include <sstream>
 #include <sys/stat.h>
 #include <time.h>
+#ifdef WIN32
+#include <windows.h>
+#endif
 
 #include <mednafen/mednafen.h>
 #include "../video/png.h"
@@ -45,8 +55,9 @@ namespace MDFN_IEN_SS {
  uint8 Automation_ReadMem8(uint32 addr);
  std::string Automation_DumpRegs(void);
  void Automation_DumpRegsBin(const char* path);
- void Automation_EnablePCTrace(void);
- void Automation_DisablePCTrace(void);
+ void Automation_EnableCPUHook(void);
+ void Automation_DisableCPUHook(void);
+ uint32 Automation_GetMasterPC(void);
 }
 
 static bool automation_active = false;
@@ -86,13 +97,33 @@ static bool input_override = false;
 // Pending screenshot
 static std::string pending_screenshot_path;
 
+// Pending window visibility changes
+static bool pending_show_window = false;
+static bool pending_hide_window = false;
+
 // PC trace state
 static FILE* pc_trace_file = nullptr;
 static bool pc_trace_active = false;
 static bool pc_trace_frame_mode = false;
 
-// File modification time tracking (nanosecond precision to detect rapid updates)
-static struct timespec last_action_mtim = {0, 0};
+// Instruction stepping state
+static int64_t instructions_to_step = -1;  // -1=not stepping, 0=step done, >0=counting
+static bool instruction_paused = false;     // true when spin-waiting inside debug hook
+
+// Breakpoint list
+static std::vector<uint32_t> breakpoints;
+
+// Track whether the CPU debug hook is currently enabled
+static bool cpu_hook_active = false;
+
+// Monotonic sequence counter — ensures every ack is unique even if PC/frame are same
+static uint64_t ack_seq = 0;
+
+// File modification time tracking
+// On Linux, st_mtim gives nanosecond precision. On Windows, only seconds — so we
+// also track file size to detect rapid successive writes within the same second.
+static time_t last_action_mtime = 0;
+static off_t last_action_size = 0;
 
 static void write_ack(const std::string& msg)
 {
@@ -100,6 +131,20 @@ static void write_ack(const std::string& msg)
  if (f.is_open()) {
   f << msg << "\n";
   f.close();
+ }
+}
+
+// Enable/disable the SH-2 CPU debug hook based on what features need it.
+// Called after any change to pc_trace, stepping, or breakpoint state.
+static void update_cpu_hook(void)
+{
+ bool need = pc_trace_active || (instructions_to_step >= 0) || !breakpoints.empty();
+ if (need && !cpu_hook_active) {
+  MDFN_IEN_SS::Automation_EnableCPUHook();
+  cpu_hook_active = true;
+ } else if (!need && cpu_hook_active) {
+  MDFN_IEN_SS::Automation_DisableCPUHook();
+  cpu_hook_active = false;
  }
 }
 
@@ -184,6 +229,9 @@ static void process_command(const std::string& line)
   iss >> n;
   if (n < 1) n = 1;
   frames_to_advance = n;
+  instruction_paused = false;   // unblock instruction-level pause
+  instructions_to_step = -1;    // cancel step mode
+  update_cpu_hook();
   write_ack("ok frame_advance " + std::to_string(n));
  }
  else if (cmd == "screenshot") {
@@ -230,11 +278,17 @@ static void process_command(const std::string& line)
   iss >> n;
   run_to_frame_target = n;
   frames_to_advance = -1;  // free-run until target
+  instruction_paused = false;
+  instructions_to_step = -1;
+  update_cpu_hook();
   write_ack("ok run_to_frame " + std::to_string(n));
  }
  else if (cmd == "run") {
   frames_to_advance = -1;
   run_to_frame_target = -1;
+  instruction_paused = false;
+  instructions_to_step = -1;
+  update_cpu_hook();
   write_ack("ok run");
  }
  else if (cmd == "pause") {
@@ -256,7 +310,9 @@ static void process_command(const std::string& line)
  else if (cmd == "status") {
   std::ostringstream ss;
   ss << "status frame=" << frame_counter;
-  ss << " paused=" << (frames_to_advance == 0 ? "true" : "false");
+  ss << " paused=" << ((frames_to_advance == 0 || instruction_paused) ? "true" : "false");
+  ss << " inst_paused=" << (instruction_paused ? "true" : "false");
+  ss << " breakpoints=" << breakpoints.size();
   ss << " input=0x" << std::hex << input_buttons;
   write_ack(ss.str());
  }
@@ -304,10 +360,64 @@ static void process_command(const std::string& line)
     pc_trace_active = true;
     pc_trace_frame_mode = true;
     frames_to_advance = 1;
-    MDFN_IEN_SS::Automation_EnablePCTrace();
+    update_cpu_hook();
     write_ack("ok pc_trace_frame_started");
    }
   }
+ }
+ else if (cmd == "step") {
+  int64_t n = 1;
+  iss >> n;
+  if (n < 1) n = 1;
+  instructions_to_step = n;
+  instruction_paused = false;  // unblock instruction-level pause if active
+  // Unblock frame-level pause — the CPU hook will pause us after N instructions
+  if (frames_to_advance == 0)
+   frames_to_advance = -1;
+  update_cpu_hook();
+  write_ack("ok step " + std::to_string(n));
+ }
+ else if (cmd == "breakpoint") {
+  uint32_t addr = 0;
+  iss >> std::hex >> addr;
+  breakpoints.push_back(addr);
+  update_cpu_hook();
+  char buf[32];
+  snprintf(buf, sizeof(buf), "0x%08X", addr);
+  write_ack(std::string("ok breakpoint ") + buf + " total=" + std::to_string(breakpoints.size()));
+ }
+ else if (cmd == "breakpoint_clear") {
+  size_t count = breakpoints.size();
+  breakpoints.clear();
+  update_cpu_hook();
+  write_ack("ok breakpoint_clear removed=" + std::to_string(count));
+ }
+ else if (cmd == "breakpoint_list") {
+  std::ostringstream ss;
+  ss << "breakpoints count=" << breakpoints.size();
+  for (size_t i = 0; i < breakpoints.size(); i++) {
+   char buf[16];
+   snprintf(buf, sizeof(buf), " 0x%08X", breakpoints[i]);
+   ss << buf;
+  }
+  write_ack(ss.str());
+ }
+ else if (cmd == "continue") {
+  instruction_paused = false;  // unblock instruction-level pause
+  instructions_to_step = -1;   // no step counting
+  // Unblock frame-level pause — will run until breakpoint or next pause command
+  if (frames_to_advance == 0)
+   frames_to_advance = -1;
+  update_cpu_hook();
+  write_ack("ok continue");
+ }
+ else if (cmd == "show_window") {
+  pending_show_window = true;
+  write_ack("ok show_window");
+ }
+ else if (cmd == "hide_window") {
+  pending_hide_window = true;
+  write_ack("ok hide_window");
  }
  else {
   write_ack("error unknown command: " + cmd);
@@ -320,12 +430,12 @@ static bool check_action_file(void)
  if (stat(action_file.c_str(), &st) != 0)
   return false;
 
- // Use nanosecond-precision mtime to detect rapid updates
- if (st.st_mtim.tv_sec == last_action_mtim.tv_sec &&
-     st.st_mtim.tv_nsec == last_action_mtim.tv_nsec)
+ // Detect changes via mtime + size (size handles rapid writes within same second on Windows)
+ if (st.st_mtime == last_action_mtime && st.st_size == last_action_size)
   return false;
 
- last_action_mtim = st.st_mtim;
+ last_action_mtime = st.st_mtime;
+ last_action_size = st.st_size;
 
  // Read and process all commands
  std::ifstream f(action_file);
@@ -354,8 +464,9 @@ void Automation_Init(const std::string& dir)
  ack_file = dir + "/mednafen_ack.txt";
  automation_active = true;
  frame_counter = 0;
- frames_to_advance = -1;  // Start free-running
- last_action_mtim = {0, 0};
+ frames_to_advance = 0;  // Start PAUSED — external tool must send "run" or "frame_advance"
+ last_action_mtime = 0;
+ last_action_size = 0;
 
  // Write initial ack so external tools know we're ready
  write_ack("ready frame=0");
@@ -398,7 +509,7 @@ void Automation_Poll(void* surface, void* rect, void* lw)
     pc_trace_file = nullptr;
     pc_trace_active = false;
     pc_trace_frame_mode = false;
-    MDFN_IEN_SS::Automation_DisablePCTrace();
+    update_cpu_hook();
     write_ack("done pc_trace_frame frame=" + std::to_string(frame_counter));
    } else {
     write_ack("done frame_advance frame=" + std::to_string(frame_counter));
@@ -413,8 +524,12 @@ void Automation_Poll(void* surface, void* rect, void* lw)
  // This prevents the emulator from running ahead while the orchestrator
  // reads acks and sends new commands.
  while (frames_to_advance == 0 && automation_active) {
+#ifdef WIN32
+  Sleep(10); // 10ms
+#else
   struct timespec ts = {0, 10000000}; // 10ms
   nanosleep(&ts, NULL);
+#endif
   check_action_file();
  }
 }
@@ -452,13 +567,82 @@ bool Automation_GetInput(unsigned port, uint8_t* data, unsigned data_size)
  return true;
 }
 
+bool Automation_ConsumePendingShowWindow(void)
+{
+ if (pending_show_window) {
+  pending_show_window = false;
+  return true;
+ }
+ return false;
+}
+
+bool Automation_ConsumePendingHideWindow(void)
+{
+ if (pending_hide_window) {
+  pending_hide_window = false;
+  return true;
+ }
+ return false;
+}
+
 bool Automation_DebugHook(uint32_t pc)
 {
- if (!pc_trace_active || !pc_trace_file)
+ // PC trace — record every instruction's PC to file
+ if (pc_trace_active && pc_trace_file) {
+  fwrite(&pc, 4, 1, pc_trace_file);
+ }
+
+ // Check breakpoints
+ bool bp_hit = false;
+ for (size_t i = 0; i < breakpoints.size(); i++) {
+  if (pc == breakpoints[i]) {
+   bp_hit = true;
+   break;
+  }
+ }
+
+ // Instruction step countdown
+ if (instructions_to_step > 0)
+  instructions_to_step--;
+
+ // Determine if we should pause
+ bool should_pause = bp_hit || (instructions_to_step == 0);
+ if (!should_pause)
   return false;
 
- // Write PC as native uint32 to trace file
- fwrite(&pc, 4, 1, pc_trace_file);
+ // Pause at instruction level
+ instruction_paused = true;
+ instructions_to_step = -1;
+
+ // The `pc` parameter from the debug hook is the instruction decode address (PC_ID).
+ // CPU[0].PC is the pipeline fetch address (typically 4 bytes ahead on SH-2).
+ // For breakpoint hits, `pc` is guaranteed correct (it matched the breakpoint).
+ // For step completion, use CPU[0].PC as the authoritative value.
+ uint32_t real_pc = MDFN_IEN_SS::Automation_GetMasterPC();
+ ack_seq++;
+
+ char msg[256];
+ if (bp_hit)
+  snprintf(msg, sizeof(msg), "break pc=0x%08X addr=0x%08X frame=%llu seq=%llu",
+   pc, pc, (unsigned long long)frame_counter, (unsigned long long)ack_seq);
+ else
+  snprintf(msg, sizeof(msg), "done step pc=0x%08X frame=%llu seq=%llu",
+   real_pc, (unsigned long long)frame_counter, (unsigned long long)ack_seq);
+ write_ack(msg);
+
+ // Spin-wait for commands while paused at instruction level.
+ // This blocks the SH-2 CPU loop. Commands like dump_regs, dump_mem,
+ // step, continue, breakpoint all work during this pause because
+ // check_action_file -> process_command handles them.
+ while (instruction_paused && automation_active) {
+#ifdef WIN32
+  Sleep(10);
+#else
+  struct timespec ts = {0, 10000000}; // 10ms
+  nanosleep(&ts, NULL);
+#endif
+  check_action_file();
+ }
 
  return false;
 }

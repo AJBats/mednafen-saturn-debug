@@ -489,6 +489,12 @@ uint8 Automation_ReadMem8(uint32 addr)
  return 0xFF; // Unmapped
 }
 
+// Automation: get current master CPU PC (the real register, not the debug pipeline PC).
+uint32 Automation_GetMasterPC(void)
+{
+ return CPU[0].PC;
+}
+
 // Automation: dump master SH-2 CPU registers as a formatted string.
 std::string Automation_DumpRegs(void)
 {
@@ -542,14 +548,14 @@ static void Automation_PCTraceCallback(uint32 PC, bool bpoint)
 }
 #endif
 
-void Automation_EnablePCTrace(void)
+void Automation_EnableCPUHook(void)
 {
 #ifdef WANT_DEBUGGER
  DBG_SetCPUCallback(Automation_PCTraceCallback, true);
 #endif
 }
 
-void Automation_DisablePCTrace(void)
+void Automation_DisableCPUHook(void)
 {
 #ifdef WANT_DEBUGGER
  DBG_SetCPUCallback(nullptr, false);

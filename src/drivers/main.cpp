@@ -2682,6 +2682,12 @@ static bool MDFND_Update(int WhichVideoBuffer, int16 *Buffer, int Count)
   // Automation: poll for commands each frame
   Automation_Poll(surface, rect, lw);
 
+  // Automation: process pending window visibility changes
+  if(Automation_ConsumePendingShowWindow())
+   Video_AutomationShowWindow();
+  if(Automation_ConsumePendingHideWindow())
+   Video_AutomationHideWindow();
+
   if(pending_snapshot)
    MDFNI_SaveSnapshot(surface, rect, lw);
 

@@ -725,8 +725,7 @@ void Video_SetWMInputBehavior(const WMInputBehavior& beeeeees)
 #if SDL_VERSION_ATLEAST(2, 0, 16)
  if(grab_keyboard || grab_mouse)
  {
-  SDL_ShowWindow(window);
-  if(!Automation_SuppressRaise()) SDL_RaiseWindow(window);
+  if(!Automation_SuppressRaise()) { SDL_ShowWindow(window); SDL_RaiseWindow(window); }
 
   if(grab_keyboard)
    SDL_SetWindowKeyboardGrab(window, SDL_TRUE);
@@ -757,8 +756,7 @@ void Video_SetWMInputBehavior(const WMInputBehavior& beeeeees)
  {
   SDL_SetHint(SDL_HINT_GRAB_KEYBOARD, grab_keyboard ? "1" : "0");
 
-  SDL_ShowWindow(window);
-  if(!Automation_SuppressRaise()) SDL_RaiseWindow(window);
+  if(!Automation_SuppressRaise()) { SDL_ShowWindow(window); SDL_RaiseWindow(window); }
   SDL_SetWindowGrab(window, SDL_TRUE);
  }
 
@@ -910,7 +908,11 @@ void Video_Sync(MDFNGI *gi)
  SDL_PumpEvents();
  SDL_SetWindowTitle(window, (gi && gi->name.size()) ? gi->name.c_str() : "Mednafen");
  SDL_PumpEvents();
- SDL_ShowWindow(window);
+ // In automation mode, skip SDL_ShowWindow entirely — it steals keyboard focus
+ // under WSLg regardless of hints. The window stays hidden; OpenGL rendering
+ // still works on the hidden surface for screenshot capture.
+ if(!Automation_SuppressRaise())
+  SDL_ShowWindow(window);
  SDL_PumpEvents();
 
  //
@@ -1346,6 +1348,10 @@ void Video_Init(void)
  CurWMIB.Grab_Keyboard = false;
  CurWMIB.Grab_Mouse = false;
  //
+ // In automation mode, prevent the window from stealing focus when shown
+ if(Automation_SuppressRaise())
+  SDL_SetHint("SDL_WINDOW_NO_ACTIVATION_WHEN_SHOWN", "1");
+
  for(unsigned i = 0; i < 2 && !window; i++)
  {
   static const uint32 try_flags[2] =
@@ -2031,4 +2037,16 @@ float Video_PtoV_J(const int32 inv, const bool axis, const bool scr_scale)
   return 0.5 + (inv / 32768.0 - 0.5) * std::max<int32>(VideoGI->nominal_width, VideoGI->nominal_height) / (axis ? VideoGI->nominal_height : VideoGI->nominal_width);
  else
   return inv * JoyGunTranslate[axis].mul - JoyGunTranslate[axis].sub;
+}
+
+void Video_AutomationShowWindow(void)
+{
+ if(window)
+  SDL_ShowWindow(window);
+}
+
+void Video_AutomationHideWindow(void)
+{
+ if(window)
+  SDL_HideWindow(window);
 }

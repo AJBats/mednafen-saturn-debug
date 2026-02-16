@@ -3,7 +3,8 @@
  * Provides:
  *  - Background window mode (no focus steal)
  *  - File-based command interface (frame advance, screenshot, input, debug)
- *  - SH-2 debug tools (register dump, memory dump, breakpoints, PC trace)
+ *  - SH-2 debug tools (register dump, memory dump, PC trace)
+ *  - Instruction-level stepping and PC breakpoints
  *
  * Part of mednafen-saturn-debug fork for Daytona USA reverse engineering.
  */
@@ -37,5 +38,11 @@ bool Automation_GetInput(unsigned port, uint8_t* data, unsigned data_size);
 // T3: Debug hook called from SH-2 step (master CPU only)
 // Returns true if execution should pause (breakpoint hit)
 bool Automation_DebugHook(uint32_t pc);
+
+// T4: Window visibility control — consume pending show/hide requests.
+// Returns true (and clears the flag) if a show_window/hide_window command was received.
+// Caller should call SDL_ShowWindow/SDL_HideWindow accordingly.
+bool Automation_ConsumePendingShowWindow(void);
+bool Automation_ConsumePendingHideWindow(void);
 
 #endif

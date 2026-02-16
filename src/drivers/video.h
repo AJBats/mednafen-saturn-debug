@@ -47,6 +47,10 @@ bool Video_ErrorPopup(bool warning, const char* title, const char* text);
 void Video_SetWMInputBehavior(const WMInputBehavior& beeeeees);
 
 
+// Automation window visibility control (called from game thread after Automation_Poll)
+void Video_AutomationShowWindow(void);
+void Video_AutomationHideWindow(void);
+
 //
 // Functions called from game thread:
 //
