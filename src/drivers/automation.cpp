@@ -116,20 +116,23 @@ static std::vector<uint32_t> breakpoints;
 // Track whether the CPU debug hook is currently enabled
 static bool cpu_hook_active = false;
 
-// Monotonic sequence counter — ensures every ack is unique even if PC/frame are same
+// Monotonic sequence counter — appended to every ack to guarantee uniqueness.
+// This solves change detection on DrvFS (Windows→WSL) where stat() mtime has
+// only 1-second resolution and file size padding isn't always sufficient.
 static uint64_t ack_seq = 0;
 
-// File modification time tracking
-// On Linux, st_mtim gives nanosecond precision. On Windows, only seconds — so we
-// also track file size to detect rapid successive writes within the same second.
-static time_t last_action_mtime = 0;
-static off_t last_action_size = 0;
+// Content-based change detection for action file.
+// DrvFS (Windows→WSL filesystem) has unreliable stat() mtime caching that can
+// miss rapid file updates from the Windows side. Instead of stat(), we read
+// the first line (comment with sequence number) and compare to last-seen content.
+static std::string last_action_header;
 
 static void write_ack(const std::string& msg)
 {
+ ack_seq++;
  std::ofstream f(ack_file, std::ios::trunc);
  if (f.is_open()) {
-  f << msg << "\n";
+  f << msg << " seq=" << ack_seq << "\n";
   f.close();
  }
 }
@@ -341,7 +344,9 @@ static void process_command(const std::string& line)
      fwrite(&b, 1, 1, f);
     }
     fclose(f);
-    write_ack("ok dump_mem_bin");
+    char ack_msg[128];
+    snprintf(ack_msg, sizeof(ack_msg), "ok dump_mem_bin 0x%08X 0x%X", addr, size);
+    write_ack(ack_msg);
    } else {
     write_ack("error dump_mem_bin: cannot open " + path);
    }
@@ -426,22 +431,29 @@ static void process_command(const std::string& line)
 
 static bool check_action_file(void)
 {
- struct stat st;
- if (stat(action_file.c_str(), &st) != 0)
-  return false;
-
- // Detect changes via mtime + size (size handles rapid writes within same second on Windows)
- if (st.st_mtime == last_action_mtime && st.st_size == last_action_size)
-  return false;
-
- last_action_mtime = st.st_mtime;
- last_action_size = st.st_size;
-
- // Read and process all commands
+ // Content-based change detection: read file and check if header line changed.
+ // This avoids DrvFS stat() caching issues.
  std::ifstream f(action_file);
  if (!f.is_open())
   return false;
 
+ // Read first line (header comment with sequence number, e.g. "# 5.....")
+ std::string header;
+ if (!std::getline(f, header)) {
+  f.close();
+  return false;
+ }
+ // Strip \r
+ if (!header.empty() && header.back() == '\r')
+  header.pop_back();
+
+ if (header == last_action_header) {
+  f.close();
+  return false;
+ }
+ last_action_header = header;
+
+ // Process remaining lines as commands
  std::string line;
  while (std::getline(f, line)) {
   // Strip \r (Windows line endings)
@@ -465,8 +477,7 @@ void Automation_Init(const std::string& dir)
  automation_active = true;
  frame_counter = 0;
  frames_to_advance = 0;  // Start PAUSED — external tool must send "run" or "frame_advance"
- last_action_mtime = 0;
- last_action_size = 0;
+ last_action_header.clear();
 
  // Write initial ack so external tools know we're ready
  write_ack("ready frame=0");
@@ -619,15 +630,15 @@ bool Automation_DebugHook(uint32_t pc)
  // For breakpoint hits, `pc` is guaranteed correct (it matched the breakpoint).
  // For step completion, use CPU[0].PC as the authoritative value.
  uint32_t real_pc = MDFN_IEN_SS::Automation_GetMasterPC();
- ack_seq++;
+ // ack_seq is auto-incremented by write_ack() now
 
  char msg[256];
  if (bp_hit)
-  snprintf(msg, sizeof(msg), "break pc=0x%08X addr=0x%08X frame=%llu seq=%llu",
-   pc, pc, (unsigned long long)frame_counter, (unsigned long long)ack_seq);
+  snprintf(msg, sizeof(msg), "break pc=0x%08X addr=0x%08X frame=%llu",
+   pc, pc, (unsigned long long)frame_counter);
  else
-  snprintf(msg, sizeof(msg), "done step pc=0x%08X frame=%llu seq=%llu",
-   real_pc, (unsigned long long)frame_counter, (unsigned long long)ack_seq);
+  snprintf(msg, sizeof(msg), "done step pc=0x%08X frame=%llu",
+   real_pc, (unsigned long long)frame_counter);
  write_ack(msg);
 
  // Spin-wait for commands while paused at instruction level.
