@@ -40,6 +40,7 @@
 #include "fps.h"
 #include "help.h"
 #include "video-state.h"
+#include "automation.h"
 
 #ifdef WANT_FANCY_SCALERS
 #include "scalebit.h"
@@ -725,7 +726,7 @@ void Video_SetWMInputBehavior(const WMInputBehavior& beeeeees)
  if(grab_keyboard || grab_mouse)
  {
   SDL_ShowWindow(window);
-  SDL_RaiseWindow(window);
+  if(!Automation_SuppressRaise()) SDL_RaiseWindow(window);
 
   if(grab_keyboard)
    SDL_SetWindowKeyboardGrab(window, SDL_TRUE);
@@ -757,7 +758,7 @@ void Video_SetWMInputBehavior(const WMInputBehavior& beeeeees)
   SDL_SetHint(SDL_HINT_GRAB_KEYBOARD, grab_keyboard ? "1" : "0");
 
   SDL_ShowWindow(window);
-  SDL_RaiseWindow(window);
+  if(!Automation_SuppressRaise()) SDL_RaiseWindow(window);
   SDL_SetWindowGrab(window, SDL_TRUE);
  }
 

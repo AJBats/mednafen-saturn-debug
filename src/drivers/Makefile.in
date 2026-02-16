@@ -137,6 +137,7 @@ am__libmdfnsdl_a_SOURCES_DIST = main.cpp args.cpp help.cpp ers.cpp \
 	Joystick.cpp Joystick_SDL.cpp Joystick_Linux.cpp \
 	Joystick_XInput.cpp Joystick_DX5.cpp TextEntry.cpp console.cpp \
 	cheat.cpp fps.cpp video-state.cpp remote.cpp rmdui.cpp \
+	automation.cpp \
 	opengl.cpp shader.cpp nongl.cpp nnx.cpp video.cpp \
 	hqxx-common.cpp hq2x.cpp hq3x.cpp hq4x.cpp scale2x.c scale3x.c \
 	scalebit.c 2xSaI.cpp debugger.cpp gfxdebugger.cpp \
@@ -159,7 +160,7 @@ am_libmdfnsdl_a_OBJECTS = main.$(OBJEXT) args.$(OBJEXT) help.$(OBJEXT) \
 	Joystick.$(OBJEXT) Joystick_SDL.$(OBJEXT) $(am__objects_1) \
 	$(am__objects_2) TextEntry.$(OBJEXT) console.$(OBJEXT) \
 	cheat.$(OBJEXT) fps.$(OBJEXT) video-state.$(OBJEXT) \
-	remote.$(OBJEXT) rmdui.$(OBJEXT) opengl.$(OBJEXT) \
+	remote.$(OBJEXT) rmdui.$(OBJEXT) automation.$(OBJEXT) opengl.$(OBJEXT) \
 	shader.$(OBJEXT) nongl.$(OBJEXT) nnx.$(OBJEXT) video.$(OBJEXT) \
 	$(am__objects_3) $(am__objects_4)
 libmdfnsdl_a_OBJECTS = $(am_libmdfnsdl_a_OBJECTS)
@@ -191,7 +192,8 @@ am__depfiles_remade = ./$(DEPDIR)/2xSaI.Po ./$(DEPDIR)/Joystick.Po \
 	./$(DEPDIR)/mouse.Po ./$(DEPDIR)/netplay.Po ./$(DEPDIR)/nnx.Po \
 	./$(DEPDIR)/nongl.Po ./$(DEPDIR)/opengl.Po \
 	./$(DEPDIR)/prompt.Po ./$(DEPDIR)/remote.Po \
-	./$(DEPDIR)/rmdui.Po ./$(DEPDIR)/scale2x.Po \
+	./$(DEPDIR)/rmdui.Po ./$(DEPDIR)/automation.Po \
+	./$(DEPDIR)/scale2x.Po \
 	./$(DEPDIR)/scale3x.Po ./$(DEPDIR)/scalebit.Po \
 	./$(DEPDIR)/shader.Po ./$(DEPDIR)/sound.Po \
 	./$(DEPDIR)/video-state.Po ./$(DEPDIR)/video.Po
@@ -443,7 +445,7 @@ libmdfnsdl_a_SOURCES = main.cpp args.cpp help.cpp ers.cpp sound.cpp \
 	netplay.cpp input.cpp mouse.cpp keyboard.cpp Joystick.cpp \
 	Joystick_SDL.cpp $(am__append_1) $(am__append_2) TextEntry.cpp \
 	console.cpp cheat.cpp fps.cpp video-state.cpp remote.cpp \
-	rmdui.cpp opengl.cpp shader.cpp nongl.cpp nnx.cpp video.cpp \
+	rmdui.cpp automation.cpp opengl.cpp shader.cpp nongl.cpp nnx.cpp video.cpp \
 	$(am__append_3) $(am__append_4)
 all: all-am
 
@@ -525,6 +527,7 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/prompt.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/remote.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/rmdui.Po@am__quote@ # am--include-marker
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/automation.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/scale2x.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/scale3x.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/scalebit.Po@am__quote@ # am--include-marker
@@ -727,6 +730,7 @@ distclean: distclean-am
 	-rm -f ./$(DEPDIR)/prompt.Po
 	-rm -f ./$(DEPDIR)/remote.Po
 	-rm -f ./$(DEPDIR)/rmdui.Po
+	-rm -f ./$(DEPDIR)/automation.Po
 	-rm -f ./$(DEPDIR)/scale2x.Po
 	-rm -f ./$(DEPDIR)/scale3x.Po
 	-rm -f ./$(DEPDIR)/scalebit.Po
@@ -811,6 +815,7 @@ maintainer-clean: maintainer-clean-am
 	-rm -f ./$(DEPDIR)/prompt.Po
 	-rm -f ./$(DEPDIR)/remote.Po
 	-rm -f ./$(DEPDIR)/rmdui.Po
+	-rm -f ./$(DEPDIR)/automation.Po
 	-rm -f ./$(DEPDIR)/scale2x.Po
 	-rm -f ./$(DEPDIR)/scale3x.Po
 	-rm -f ./$(DEPDIR)/scalebit.Po

@@ -56,6 +56,7 @@
 #include "remote.h"
 #include "ers.h"
 #include "rmdui.h"
+#include "automation.h"
 #include <mednafen/qtrecord.h>
 #include <mednafen/tests.h>
 #include <mednafen/testsexp.h>
@@ -77,6 +78,7 @@ static bool NeededWMInputBehavior_Dirty = false;
 
 bool MDFNDHaveFocus;
 static bool RemoteOn = FALSE;
+static char* PendingAutomationDir = NULL;
 bool pending_save_state, pending_snapshot, pending_ssnapshot, pending_save_movie;
 static uint64 MainThreadID = 0;
 static bool ffnosound;
@@ -907,6 +909,7 @@ static bool DoArgs(int argc, char *argv[], char **filename)
 	 { "qtrecord", _("Record video and audio output to the specified filename in the QuickTime format."), 0, &qtrecfn, SUBSTYPE_STRING_ALLOC }, // TODOC: Video recording done without filtering applied.
 
 	 { "remote", /*_("Enable remote mode with the specified stdout key(EXPERIMENTAL AND INCOMPLETE).")*/NULL, 0, &dummy_remote, SUBSTYPE_STRING_ALLOC },
+	 { "automation", _("Enable automation mode with specified directory for action/ack files."), 0, &PendingAutomationDir, SUBSTYPE_STRING_ALLOC },
 	 { "dump_settings_def", /*_("Dump settings definition data to specified file.")*/NULL, 0, &dsfn, SUBSTYPE_STRING_ALLOC },
 	 { "dump_modules_def", /*_("Dump modules definition data to specified file.")*/NULL, 0, &dmfn, SUBSTYPE_STRING_ALLOC },
 
@@ -1214,6 +1217,7 @@ static void CloseGame(void)
 	MDFNI_NetplayDisconnect();
 
 	Debugger_Kill();
+	Automation_Kill();
 
 	RMDUI_Kill();
 	Input_GameClosed();
@@ -2412,6 +2416,14 @@ int main(int argc, char *argv[])
 	 MDFNI_Kill();
 	 return -1;
 	}
+
+	// Initialize automation if --automation flag was passed
+	if(PendingAutomationDir)
+	{
+	 Automation_Init(std::string(PendingAutomationDir));
+	 free(PendingAutomationDir);
+	 PendingAutomationDir = NULL;
+	}
 	//
 	//
 	//
@@ -2666,6 +2678,9 @@ static bool MDFND_Update(int WhichVideoBuffer, int16 *Buffer, int Count)
   MDFN_Surface* surface = SoftFB[WhichVideoBuffer].surface.get();
   MDFN_Rect* rect = &SoftFB[WhichVideoBuffer].rect;
   int32* lw = SoftFB[WhichVideoBuffer].lw.get();
+
+  // Automation: poll for commands each frame
+  Automation_Poll(surface, rect, lw);
 
   if(pending_snapshot)
    MDFNI_SaveSnapshot(surface, rect, lw);

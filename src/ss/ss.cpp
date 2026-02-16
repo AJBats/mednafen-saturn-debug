@@ -459,6 +459,55 @@ void SS_SetPhysMemMap(uint32 Astart, uint32 Aend, uint16* ptr, uint32 length, bo
   SetFastMemMap(Astart + Abase, Aend + Abase, ptr, length, is_writeable);
 }
 
+// Automation: read a byte from Saturn physical address space.
+// Supports WorkRAMH (0x06000000), WorkRAML (0x00200000), BIOSROM (0x00000000).
+uint8 Automation_ReadMem8(uint32 addr)
+{
+ addr &= 0x0FFFFFFF; // Strip mirror bits
+
+ if (addr >= 0x06000000 && addr <= 0x060FFFFF) {
+  // WorkRAMH — stored as big-endian uint16 array
+  uint32 off = addr & 0xFFFFF;
+  uint16 w = WorkRAMH[off >> 1];
+  return (off & 1) ? (w & 0xFF) : (w >> 8);
+ }
+ else if (addr >= 0x00200000 && addr <= 0x002FFFFF) {
+  // WorkRAML
+  uint32 off = addr & 0xFFFFF;
+  uint16 w = WorkRAML[off >> 1];
+  return (off & 1) ? (w & 0xFF) : (w >> 8);
+ }
+ else if (addr < 0x00080000) {
+  // BIOSROM
+  uint16 w = BIOSROM[addr >> 1];
+  return (addr & 1) ? (w & 0xFF) : (w >> 8);
+ }
+
+ return 0xFF; // Unmapped
+}
+
+// Automation: dump master SH-2 CPU registers as a formatted string.
+std::string Automation_DumpRegs(void)
+{
+ std::string s = "regs";
+ char buf[64];
+
+ for (int i = 0; i < 16; i++) {
+  snprintf(buf, sizeof(buf), " R%d=%08X", i, CPU[0].R[i]);
+  s += buf;
+ }
+
+ snprintf(buf, sizeof(buf), " PC=%08X", CPU[0].PC); s += buf;
+ snprintf(buf, sizeof(buf), " SR=%08X", CPU[0].SR); s += buf;
+ snprintf(buf, sizeof(buf), " PR=%08X", CPU[0].PR); s += buf;
+ snprintf(buf, sizeof(buf), " GBR=%08X", CPU[0].GBR); s += buf;
+ snprintf(buf, sizeof(buf), " VBR=%08X", CPU[0].VBR); s += buf;
+ snprintf(buf, sizeof(buf), " MACH=%08X", CPU[0].MACH); s += buf;
+ snprintf(buf, sizeof(buf), " MACL=%08X", CPU[0].MACL); s += buf;
+
+ return s;
+}
+
 #include "sh7095.inc"
 
 //
