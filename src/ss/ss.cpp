@@ -462,11 +462,28 @@ void SS_SetPhysMemMap(uint32 Astart, uint32 Aend, uint16* ptr, uint32 length, bo
   SetFastMemMap(Astart + Abase, Aend + Abase, ptr, length, is_writeable);
 }
 
-// Automation: read a byte from Saturn physical address space.
-// Supports WorkRAMH (0x06000000), WorkRAML (0x00200000), BIOSROM (0x00000000).
+// Automation: read a byte from Saturn address space as the master CPU sees it.
+// Checks the SH-2 cache first (matching the CPU's actual view), then falls back
+// to the backing store (WorkRAMH/WorkRAML/BIOSROM).
 uint8 Automation_ReadMem8(uint32 addr)
 {
  addr &= 0x0FFFFFFF; // Strip mirror bits
+
+ // Check master SH-2 cache for cacheable regions (0x00000000-0x07FFFFFF).
+ // The SH-2 cache uses bits [28:26] as region, region 0 is cacheable.
+ if ((addr >> 26) == 0 && (CPU[0].CCR & SH7095::CCR_CE))
+ {
+  uint32 ATM = addr & (0x7FFFF << 10);
+  auto* cent = &CPU[0].Cache[(addr >> 4) & 0x3F];
+
+  for (int way = 0; way < 4; way++) {
+   if (cent->Tag[way] == ATM) {
+    // Cache hit — return the byte from cache data (big-endian)
+    return cent->Data[way][addr & 0x0F];
+   }
+  }
+  // Cache miss — fall through to backing store
+ }
 
  if (addr >= 0x06000000 && addr <= 0x060FFFFF) {
   // WorkRAMH — stored as big-endian uint16 array
