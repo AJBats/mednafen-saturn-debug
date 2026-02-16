@@ -54,6 +54,9 @@ using namespace Mednafen;
 #include "cart.h"
 #include "db.h"
 
+// Forward declaration — defined in drivers/automation.cpp (global namespace)
+bool Automation_DebugHook(uint32_t pc);
+
 namespace MDFN_IEN_SS
 {
 
@@ -506,6 +509,51 @@ std::string Automation_DumpRegs(void)
  snprintf(buf, sizeof(buf), " MACL=%08X", CPU[0].MACL); s += buf;
 
  return s;
+}
+
+// Automation: dump master SH-2 CPU registers to a binary file.
+// Format: 22 x uint32 native-endian: R0-R15, PC, SR, PR, GBR, VBR, MACH
+void Automation_DumpRegsBin(const char* path)
+{
+ uint32 regs[22];
+ for (int i = 0; i < 16; i++)
+  regs[i] = CPU[0].R[i];
+ regs[16] = CPU[0].PC;
+ regs[17] = CPU[0].SR;
+ regs[18] = CPU[0].PR;
+ regs[19] = CPU[0].GBR;
+ regs[20] = CPU[0].VBR;
+ regs[21] = CPU[0].MACH;
+
+ FILE* f = fopen(path, "wb");
+ if (f) {
+  fwrite(regs, 4, 22, f);
+  fclose(f);
+ }
+}
+
+// Automation: PC trace callback — called by DBG_CPUHandler for every master CPU instruction.
+// Forwards to Automation_DebugHook in automation.cpp (global namespace).
+#ifdef WANT_DEBUGGER
+static void Automation_PCTraceCallback(uint32 PC, bool bpoint)
+{
+ (void)bpoint;
+ ::Automation_DebugHook(PC);
+}
+#endif
+
+void Automation_EnablePCTrace(void)
+{
+#ifdef WANT_DEBUGGER
+ DBG_SetCPUCallback(Automation_PCTraceCallback, true);
+#endif
+}
+
+void Automation_DisablePCTrace(void)
+{
+#ifdef WANT_DEBUGGER
+ DBG_SetCPUCallback(nullptr, false);
+#endif
 }
 
 #include "sh7095.inc"

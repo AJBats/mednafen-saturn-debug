@@ -17,7 +17,10 @@
  *   dump_mem <addr> <size>     - Dump memory (hex), addr in hex
  *   status                     - Report current frame, pause state, etc.
  *   run                        - Free-run (unpause)
- *   pause                      - Pause emulation
+ *   pause                      - Pause emulation (blocking)
+ *   dump_regs_bin <path>       - Write 22 uint32s (R0-R15,PC,SR,PR,GBR,VBR,MACH) to binary file
+ *   dump_mem_bin <addr> <sz> <path> - Write raw memory bytes to binary file
+ *   pc_trace_frame <path>      - Trace all master CPU PCs for 1 frame to binary file
  *
  * Part of mednafen-saturn-debug fork.
  */
@@ -32,6 +35,7 @@
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
+#include <time.h>
 
 #include <mednafen/mednafen.h>
 #include "../video/png.h"
@@ -40,6 +44,9 @@
 namespace MDFN_IEN_SS {
  uint8 Automation_ReadMem8(uint32 addr);
  std::string Automation_DumpRegs(void);
+ void Automation_DumpRegsBin(const char* path);
+ void Automation_EnablePCTrace(void);
+ void Automation_DisablePCTrace(void);
 }
 
 static bool automation_active = false;
@@ -79,8 +86,13 @@ static bool input_override = false;
 // Pending screenshot
 static std::string pending_screenshot_path;
 
-// File modification time tracking
-static time_t last_action_mtime = 0;
+// PC trace state
+static FILE* pc_trace_file = nullptr;
+static bool pc_trace_active = false;
+static bool pc_trace_frame_mode = false;
+
+// File modification time tracking (nanosecond precision to detect rapid updates)
+static struct timespec last_action_mtim = {0, 0};
 
 static void write_ack(const std::string& msg)
 {
@@ -248,6 +260,55 @@ static void process_command(const std::string& line)
   ss << " input=0x" << std::hex << input_buttons;
   write_ack(ss.str());
  }
+ else if (cmd == "dump_regs_bin") {
+  std::string path;
+  iss >> path;
+  if (path.empty()) {
+   write_ack("error dump_regs_bin: no path");
+  } else {
+   MDFN_IEN_SS::Automation_DumpRegsBin(path.c_str());
+   write_ack("ok dump_regs_bin " + path);
+  }
+ }
+ else if (cmd == "dump_mem_bin") {
+  uint32_t addr = 0, size = 0;
+  std::string path;
+  iss >> std::hex >> addr >> size >> path;
+  if (path.empty() || size == 0) {
+   write_ack("error dump_mem_bin: need addr size path");
+  } else {
+   if (size > 0x100000) size = 0x100000;
+   FILE* f = fopen(path.c_str(), "wb");
+   if (f) {
+    for (uint32_t i = 0; i < size; i++) {
+     uint8_t b = MDFN_IEN_SS::Automation_ReadMem8(addr + i);
+     fwrite(&b, 1, 1, f);
+    }
+    fclose(f);
+    write_ack("ok dump_mem_bin");
+   } else {
+    write_ack("error dump_mem_bin: cannot open " + path);
+   }
+  }
+ }
+ else if (cmd == "pc_trace_frame") {
+  std::string path;
+  iss >> path;
+  if (path.empty()) {
+   write_ack("error pc_trace_frame: no path");
+  } else {
+   pc_trace_file = fopen(path.c_str(), "wb");
+   if (!pc_trace_file) {
+    write_ack("error pc_trace_frame: cannot open " + path);
+   } else {
+    pc_trace_active = true;
+    pc_trace_frame_mode = true;
+    frames_to_advance = 1;
+    MDFN_IEN_SS::Automation_EnablePCTrace();
+    write_ack("ok pc_trace_frame_started");
+   }
+  }
+ }
  else {
   write_ack("error unknown command: " + cmd);
  }
@@ -259,10 +320,12 @@ static bool check_action_file(void)
  if (stat(action_file.c_str(), &st) != 0)
   return false;
 
- if (st.st_mtime == last_action_mtime)
+ // Use nanosecond-precision mtime to detect rapid updates
+ if (st.st_mtim.tv_sec == last_action_mtim.tv_sec &&
+     st.st_mtim.tv_nsec == last_action_mtim.tv_nsec)
   return false;
 
- last_action_mtime = st.st_mtime;
+ last_action_mtim = st.st_mtim;
 
  // Read and process all commands
  std::ifstream f(action_file);
@@ -292,7 +355,7 @@ void Automation_Init(const std::string& dir)
  automation_active = true;
  frame_counter = 0;
  frames_to_advance = -1;  // Start free-running
- last_action_mtime = 0;
+ last_action_mtim = {0, 0};
 
  // Write initial ack so external tools know we're ready
  write_ack("ready frame=0");
@@ -329,12 +392,31 @@ void Automation_Poll(void* surface, void* rect, void* lw)
  if (frames_to_advance > 0) {
   frames_to_advance--;
   if (frames_to_advance == 0) {
-   write_ack("done frame_advance frame=" + std::to_string(frame_counter));
+   // If tracing a frame, close trace and disable hook
+   if (pc_trace_frame_mode && pc_trace_file) {
+    fclose(pc_trace_file);
+    pc_trace_file = nullptr;
+    pc_trace_active = false;
+    pc_trace_frame_mode = false;
+    MDFN_IEN_SS::Automation_DisablePCTrace();
+    write_ack("done pc_trace_frame frame=" + std::to_string(frame_counter));
+   } else {
+    write_ack("done frame_advance frame=" + std::to_string(frame_counter));
+   }
   }
  }
 
  // Poll for new commands (every frame)
  check_action_file();
+
+ // Block emulation when paused — spin-wait until a command unpauses us.
+ // This prevents the emulator from running ahead while the orchestrator
+ // reads acks and sends new commands.
+ while (frames_to_advance == 0 && automation_active) {
+  struct timespec ts = {0, 10000000}; // 10ms
+  nanosleep(&ts, NULL);
+  check_action_file();
+ }
 }
 
 void Automation_Kill(void)
@@ -372,8 +454,11 @@ bool Automation_GetInput(unsigned port, uint8_t* data, unsigned data_size)
 
 bool Automation_DebugHook(uint32_t pc)
 {
- // Not wired into SH-2 step loop for now (would add per-instruction overhead).
- // Register/memory dumps work any time via the action file.
- (void)pc;
+ if (!pc_trace_active || !pc_trace_file)
+  return false;
+
+ // Write PC as native uint32 to trace file
+ fwrite(&pc, 4, 1, pc_trace_file);
+
  return false;
 }
