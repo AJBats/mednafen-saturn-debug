@@ -456,6 +456,7 @@ void SH7095::TruePowerOn(void)
 
 void SH7095::SetActive(bool active)
 {
+ fprintf(stderr, "SH2_SETACTIVE: cpu=%s active=%d\n", cpu_name, (int)active);
  if(active && timestamp == SS_EVENT_DISABLED_TS)
  {
   timestamp = SH7095_mem_timestamp;
@@ -467,9 +468,11 @@ void SH7095::SetActive(bool active)
   SS_SetEventNT(&events[event_id_dma], SH7095_mem_timestamp + 1);
   //
   Reset(true);
+  fprintf(stderr, "SH2_ACTIVATED: cpu=%s PC=%08X SP=%08X VBR=%08X\n", cpu_name, PC, R[15], VBR);
  }
  else if(!active && timestamp != SS_EVENT_DISABLED_TS)
  {
+  fprintf(stderr, "SH2_DEACTIVATED: cpu=%s last_PC=%08X\n", cpu_name, PC);
   Reset(true);
   //
   timestamp = SS_EVENT_DISABLED_TS;
@@ -1754,6 +1757,14 @@ NO_INLINE MDFN_HOT void SH7095::OnChipRegWrite(uint32 A, uint32 V)
 template<typename T>
 INLINE T SH7095::OnChipRegRead_INLINE(uint32 A)
 {
+ // Trace FRT register reads specifically (0xFFFFFE10-0xFFFFFE1F)
+ {
+  static int frt_count = 0;
+  if(((uint8)A >= 0x10 && (uint8)A <= 0x1F) && !(A & 0x100) && frt_count < 200) {
+   fprintf(stderr, "FRT_READ: A=%08X Am=%02X sizeof=%zu PC=%08X\n", A, (uint8)A, sizeof(T), PC);
+   frt_count++;
+  }
+ }
  if(A & 0x100)
  {
   uint32 ret = 0;
@@ -1996,6 +2007,14 @@ INLINE T SH7095::OnChipRegRead_INLINE(uint32 A)
 	//
 	ret = FRT.FTCSR;
 	FRT.FTCSRM = 0x00;
+	// Trace FTCSR reads — check if ICF polling happens
+	{
+	 static int ftcsr_count = 0;
+	 if(ftcsr_count < 2000) {
+	  fprintf(stderr, "FTCSR_READ: cpu=%s PC=%08X val=%02X icf=%d\n", cpu_name, PC, ret, (ret >> 7) & 1);
+	  ftcsr_count++;
+	 }
+	}
 	break;
 
    case 0x12:
@@ -2706,6 +2725,10 @@ INLINE void SH7095::Cache_CheckReadIncoherency(CacheEntry* cent, const int way, 
 	goto MemReturn;												\
 														\
   case 7:													\
+	{													\
+	 static int reg7_count = 0;										\
+	 if(reg7_count < 20) { fprintf(stderr, "REG7_READ: A=%08X PC=%08X\n", unmasked_A, PC); reg7_count++; }	\
+	}													\
 	retval = OnChipRegRead(T, unmasked_A);									\
 	goto MemReturn;												\
  }														\
