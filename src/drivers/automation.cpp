@@ -28,6 +28,8 @@
  *   breakpoint_clear           - Remove all breakpoints
  *   breakpoint_list            - List active breakpoints
  *   continue                   - Resume execution (until next breakpoint or frame end)
+ *   call_trace <path>          - Start logging JSR/BSR/BSRF calls to text file
+ *   call_trace_stop            - Stop call trace logging
  *
  * Part of mednafen-saturn-debug fork.
  */
@@ -58,6 +60,8 @@ namespace MDFN_IEN_SS {
  void Automation_EnableCPUHook(void);
  void Automation_DisableCPUHook(void);
  uint32 Automation_GetMasterPC(void);
+ void Automation_EnableCallTrace(const char* path);
+ void Automation_DisableCallTrace(void);
 }
 
 static bool automation_active = false;
@@ -423,6 +427,20 @@ static void process_command(const std::string& line)
  else if (cmd == "hide_window") {
   pending_hide_window = true;
   write_ack("ok hide_window");
+ }
+ else if (cmd == "call_trace") {
+  std::string path;
+  iss >> path;
+  if (path.empty()) {
+   write_ack("error call_trace: no path");
+  } else {
+   MDFN_IEN_SS::Automation_EnableCallTrace(path.c_str());
+   write_ack("ok call_trace " + path);
+  }
+ }
+ else if (cmd == "call_trace_stop") {
+  MDFN_IEN_SS::Automation_DisableCallTrace();
+  write_ack("ok call_trace_stop");
  }
  else {
   write_ack("error unknown command: " + cmd);

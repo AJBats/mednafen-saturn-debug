@@ -117,6 +117,9 @@ class SH7095 final
  INLINE uint64 GetMAC64(void) { return MACL | ((uint64)MACH << 32); }
  INLINE void SetMAC64(uint64 nv) { MACL = nv; MACH = nv >> 32; }
 
+ // Function call trace logging (JSR/BSR/BSRF)
+ FILE* CallTraceFile = nullptr;
+
  enum // must be in range of 0 ... 7
  {
   PEX_POWERON = 0,

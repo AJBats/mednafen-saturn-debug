@@ -579,6 +579,29 @@ void Automation_DisableCPUHook(void)
 #endif
 }
 
+void Automation_EnableCallTrace(const char* path)
+{
+ // Close any existing trace first
+ if(CPU[0].CallTraceFile) { fclose(CPU[0].CallTraceFile); CPU[0].CallTraceFile = nullptr; }
+ if(CPU[1].CallTraceFile) { fclose(CPU[1].CallTraceFile); CPU[1].CallTraceFile = nullptr; }
+
+ FILE* f = fopen(path, "w");
+ if(f) {
+  // Both CPUs write to the same file, distinguished by M/S prefix
+  CPU[0].CallTraceFile = f;
+  CPU[1].CallTraceFile = f;
+ }
+}
+
+void Automation_DisableCallTrace(void)
+{
+ if(CPU[0].CallTraceFile) {
+  fclose(CPU[0].CallTraceFile);
+ }
+ CPU[0].CallTraceFile = nullptr;
+ CPU[1].CallTraceFile = nullptr;
+}
+
 #include "sh7095.inc"
 
 //
