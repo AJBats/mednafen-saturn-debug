@@ -30,6 +30,8 @@
  *   continue                   - Resume execution (until next breakpoint or frame end)
  *   call_trace <path>          - Start logging JSR/BSR/BSRF calls to text file
  *   call_trace_stop            - Stop call trace logging
+ *   watchpoint <addr>          - Break on memory write to addr (hex), reports PC+old+new value
+ *   watchpoint_clear           - Remove memory watchpoint
  *
  * Part of mednafen-saturn-debug fork.
  */
@@ -62,6 +64,9 @@ namespace MDFN_IEN_SS {
  uint32 Automation_GetMasterPC(void);
  void Automation_EnableCallTrace(const char* path);
  void Automation_DisableCallTrace(void);
+ void Automation_SetWatchpoint(uint32 addr);
+ void Automation_ClearWatchpoint(void);
+ bool Automation_CheckWatchpointActive(void);
 }
 
 static bool automation_active = false;
@@ -120,6 +125,11 @@ static std::vector<uint32_t> breakpoints;
 // Track whether the CPU debug hook is currently enabled
 static bool cpu_hook_active = false;
 
+// Memory watchpoint state
+static bool watchpoint_active = false;
+static uint32_t watchpoint_addr = 0;
+static bool watchpoint_paused = false;  // true when paused on watchpoint hit
+
 // Monotonic sequence counter — appended to every ack to guarantee uniqueness.
 // This solves change detection on DrvFS (Windows→WSL) where stat() mtime has
 // only 1-second resolution and file size padding isn't always sufficient.
@@ -145,6 +155,7 @@ static void write_ack(const std::string& msg)
 // Called after any change to pc_trace, stepping, or breakpoint state.
 static void update_cpu_hook(void)
 {
+ // Watchpoints don't need the CPU hook — they're detected inline in BusRW_DB_CS3
  bool need = pc_trace_active || (instructions_to_step >= 0) || !breakpoints.empty();
  if (need && !cpu_hook_active) {
   MDFN_IEN_SS::Automation_EnableCPUHook();
@@ -442,6 +453,25 @@ static void process_command(const std::string& line)
   MDFN_IEN_SS::Automation_DisableCallTrace();
   write_ack("ok call_trace_stop");
  }
+ else if (cmd == "watchpoint") {
+  uint32_t addr = 0;
+  iss >> std::hex >> addr;
+  watchpoint_addr = addr;
+  watchpoint_active = true;
+  watchpoint_paused = false;
+  MDFN_IEN_SS::Automation_SetWatchpoint(addr);
+  update_cpu_hook();
+  char buf[64];
+  snprintf(buf, sizeof(buf), "ok watchpoint 0x%08X", addr);
+  write_ack(buf);
+ }
+ else if (cmd == "watchpoint_clear") {
+  watchpoint_active = false;
+  watchpoint_paused = false;
+  MDFN_IEN_SS::Automation_ClearWatchpoint();
+  update_cpu_hook();
+  write_ack("ok watchpoint_clear");
+ }
  else {
   write_ack("error unknown command: " + cmd);
  }
@@ -612,6 +642,36 @@ bool Automation_ConsumePendingHideWindow(void)
   return true;
  }
  return false;
+}
+
+// Called from ss.cpp (BusRW_DB_CS3) when a memory write hits the watched address.
+// pc = current CPU PC, addr = full address written, old_val/new_val = 32-bit values.
+// pr = return address register (caller context).
+// This runs inline in the CPU execution path — must NOT block.
+void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint32_t new_val, uint32_t pr)
+{
+ if (!watchpoint_active || !automation_active)
+  return;
+
+ // Log hit to watchpoint log file (append mode)
+ static FILE* wp_log = nullptr;
+ if (!wp_log) {
+  std::string path = auto_base_dir + "/watchpoint_hits.txt";
+  wp_log = fopen(path.c_str(), "w");
+  if (wp_log) fprintf(wp_log, "# Watchpoint hits for addr 0x%08X\n", watchpoint_addr);
+ }
+ if (wp_log) {
+  fprintf(wp_log, "pc=0x%08X pr=0x%08X addr=0x%08X old=0x%08X new=0x%08X frame=%llu\n",
+   pc, pr, addr, old_val, new_val, (unsigned long long)frame_counter);
+  fflush(wp_log);
+ }
+
+ // Also write to ack so the test script can detect hits
+ char msg[256];
+ snprintf(msg, sizeof(msg),
+  "hit watchpoint pc=0x%08X pr=0x%08X old=0x%08X new=0x%08X frame=%llu",
+  pc, pr, old_val, new_val, (unsigned long long)frame_counter);
+ write_ack(msg);
 }
 
 bool Automation_DebugHook(uint32_t pc)

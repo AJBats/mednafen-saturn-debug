@@ -39,6 +39,9 @@ bool Automation_GetInput(unsigned port, uint8_t* data, unsigned data_size);
 // Returns true if execution should pause (breakpoint hit)
 bool Automation_DebugHook(uint32_t pc);
 
+// T5: Memory watchpoint hit callback — called from ss.cpp when a write hits the watched address.
+void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint32_t new_val, uint32_t pr);
+
 // T4: Window visibility control — consume pending show/hide requests.
 // Returns true (and clears the flag) if a show_window/hide_window command was received.
 // Caller should call SDL_ShowWindow/SDL_HideWindow accordingly.

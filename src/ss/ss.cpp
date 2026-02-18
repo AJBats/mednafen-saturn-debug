@@ -54,8 +54,9 @@ using namespace Mednafen;
 #include "cart.h"
 #include "db.h"
 
-// Forward declaration — defined in drivers/automation.cpp (global namespace)
+// Forward declarations — defined in drivers/automation.cpp (global namespace)
 bool Automation_DebugHook(uint32_t pc);
+void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint32_t new_val, uint32_t pr);
 
 namespace MDFN_IEN_SS
 {
@@ -140,6 +141,12 @@ static uintptr_t SH7095_FastMap[1U << (32 - SH7095_EXT_MAP_GRAN_BITS)];
 int32 SH7095_mem_timestamp;
 static uint32 SH7095_BusLock;
 static uint32 SH7095_DB;
+
+// Automation: memory write watchpoint state.
+// Placed before scu.inc so both BusRW_DB_CS3 and SCU DMA_Write can access.
+static bool automation_wp_active = false;
+static uint32 automation_wp_addr = 0;       // Work RAM High offset (masked to 0xFFFFF)
+
 #include "scu.inc"
 
 #include "debug.inc"
@@ -372,10 +379,35 @@ static INLINE void BusRW_DB_CS3(const uint32 A, uint32& DB, const bool BurstHax,
  //
  //  Timing is handled in BSC_BusWrite() and BSC_BusRead() in sh7095.inc
  //
+
+ // Automation watchpoint: detect writes that overlap watched address
+ uint32 wp_old = 0;
+ bool wp_match = false;
+ if(IsWrite && MDFN_UNLIKELY(automation_wp_active))
+ {
+  uint32 write_start = A & 0xFFFFF;
+  uint32 write_end = write_start + sizeof(T);
+  uint32 wp_start = automation_wp_addr;
+  uint32 wp_end = wp_start + 4;
+  if(write_start < wp_end && write_end > wp_start)
+  {
+   wp_old = ne16_rbo_be<uint32>(WorkRAMH, automation_wp_addr & 0xFFFFC);
+   wp_match = true;
+  }
+ }
+
  if(!IsWrite || sizeof(T) == 4)
   ne16_rwbo_be<uint32, IsWrite>(WorkRAMH, A & 0xFFFFC, &DB);
  else
   ne16_wbo_be<T>(WorkRAMH, A & 0xFFFFF, DB >> (((A & 3) ^ (4 - sizeof(T))) << 3));
+
+ // After write: read new value and report directly (no CPU hook needed)
+ if(IsWrite && MDFN_UNLIKELY(wp_match))
+ {
+  uint32 wp_new = ne16_rbo_be<uint32>(WorkRAMH, automation_wp_addr & 0xFFFFC);
+  if(wp_new != wp_old)
+   ::Automation_WatchpointHit(CPU[0].PC, A, wp_old, wp_new, CPU[0].PR);
+ }
 }
 
 //
@@ -560,7 +592,6 @@ void Automation_DumpRegsBin(const char* path)
 #ifdef WANT_DEBUGGER
 static void Automation_PCTraceCallback(uint32 PC, bool bpoint)
 {
- (void)bpoint;
  ::Automation_DebugHook(PC);
 }
 #endif
@@ -577,6 +608,22 @@ void Automation_DisableCPUHook(void)
 #ifdef WANT_DEBUGGER
  DBG_SetCPUCallback(nullptr, false);
 #endif
+}
+
+void Automation_SetWatchpoint(uint32 addr)
+{
+ automation_wp_addr = addr & 0xFFFFF;  // Mask to Work RAM High offset
+ automation_wp_active = true;
+}
+
+void Automation_ClearWatchpoint(void)
+{
+ automation_wp_active = false;
+}
+
+bool Automation_CheckWatchpointActive(void)
+{
+ return automation_wp_active;
 }
 
 void Automation_EnableCallTrace(const char* path)
