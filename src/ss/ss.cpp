@@ -196,11 +196,6 @@ static uint16 fmap_dummy[(1U << SH7095_EXT_MAP_GRAN_BITS) / sizeof(uint16)];
 template<typename T, bool IsWrite>
 static INLINE void BusRW_DB_CS0(const uint32 A, uint32& DB, const bool BurstHax, int32* SH2DMAHax)
 {
- // Canary: prove this function is called
- {
-  static int canary = 0;
-  if(canary == 0) { fprintf(stderr, "CANARY: BusRW_DB_CS0 first call A=%08X IsWrite=%d\n", A, (int)IsWrite); canary = 1; }
- }
  //
  // Low(and kinda slow) work RAM
  //
@@ -325,16 +320,7 @@ static INLINE void BusRW_DB_CS0(const uint32 A, uint32& DB, const bool BurstHax,
    {
     const unsigned c = ((A >> 23) & 1) ^ 1;
 
-    // FTI trigger logging — trace who writes to SINIT/MINIT
-    {
-     static int fti_count = 0;
-     if(fti_count < 500) {
-      fprintf(stderr, "FTI: addr=%08X target_cpu=%u master_PC=%08X slave_PC=%08X\n",
-              A, c, CPU[0].PC, CPU[1].PC);
-      fti_count++;
-     }
-    }
-
+    // FTI logging disabled: was observer effect source (500 stderr writes during boot)
     CPU[c].SetFTI(true);
     CPU[c].SetFTI(false);
    }
@@ -1475,7 +1461,7 @@ static void MDFN_COLD InitCommon(unsigned cpucache_emumode, unsigned horrible_ha
  }
 
 #ifdef MDFN_ENABLE_DEV_BUILD
- ss_dbg_mask = MDFN_GetSettingMultiM("ss.dbg_mask") | SS_DBG_ERROR;
+ ss_dbg_mask = MDFN_GetSettingMultiM("ss.dbg_mask") | SS_DBG_ERROR | SS_DBG_CDB;
 
  static const uint32 addrs[] =
  {
