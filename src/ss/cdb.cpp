@@ -4092,6 +4092,14 @@ void CDB_ResetTS(void)
 
 uint16 CDB_Read(uint32 offset)
 {
+ // Synchronize CD Block state before reading registers.
+ // Without this, HIRQ reads can return stale values because
+ // CDB_Update (which runs Drive_Run and fires periodic IRQs
+ // like HIRQ_SCDQ) may not have been called yet for the
+ // current SH-2 timestamp.
+ sscpu_timestamp_t nt = CDB_Update(SH7095_mem_timestamp);
+ SS_SetEventNT(&events[SS_EVENT_CDB], nt);
+
  uint16 ret = 0; //0xFFFF;
 
 #if 1
