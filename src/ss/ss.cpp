@@ -142,6 +142,18 @@ int32 SH7095_mem_timestamp;
 static uint32 SH7095_BusLock;
 static uint32 SH7095_DB;
 
+// Automation: absolute cycle counter (accumulated across frame boundaries).
+// CPU[0].timestamp is frame-relative (adjusted by -end_ts each frame).
+// This tracks the total end_ts accumulated, so absolute cycle = this + CPU[0].timestamp.
+static int64_t automation_total_cycles = 0;
+
+// Automation: passive inline hook — called every master CPU instruction WITHOUT
+// going through Mednafen's DebugMode/DBG_CPUHandler/ForceEventUpdates chain.
+// This is pure read-only observation: breakpoints, logging, cycle checks.
+// ForceEventUpdates is NEVER called, so emulated timing is bit-identical
+// whether this hook is active or not.
+static void (*s_automation_inline_hook)(void) = nullptr;
+
 // Automation: memory write watchpoint state.
 // Placed before scu.inc so both BusRW_DB_CS3 and SCU DMA_Write can access.
 static bool automation_wp_active = false;
@@ -545,6 +557,12 @@ uint32 Automation_GetMasterPC(void)
  return CPU[0].PC;
 }
 
+// Automation: get absolute master cycle count (survives frame-boundary adjustments).
+int64_t Automation_GetMasterCycle(void)
+{
+ return automation_total_cycles + CPU[0].timestamp;
+}
+
 // Automation: dump master SH-2 CPU registers as a formatted string.
 std::string Automation_DumpRegs(void)
 {
@@ -588,27 +606,24 @@ void Automation_DumpRegsBin(const char* path)
  }
 }
 
-// Automation: PC trace callback — called by DBG_CPUHandler for every master CPU instruction.
-// Forwards to Automation_DebugHook in automation.cpp (global namespace).
-#ifdef WANT_DEBUGGER
-static void Automation_PCTraceCallback(uint32 PC, bool bpoint)
+// Automation: passive inline hook callback.
+// Called from RunLoop_INLINE on every master CPU instruction when active.
+// Does NOT go through DebugMode/DBG_CPUHandler/ForceEventUpdates — zero
+// timing side effects. Observation is completely invisible to the emulated Saturn.
+static void Automation_InlineHookCallback(void)
 {
- ::Automation_DebugHook(PC);
+ uint32 pc = Automation_GetMasterPC();
+ ::Automation_DebugHook(pc);
 }
-#endif
 
 void Automation_EnableCPUHook(void)
 {
-#ifdef WANT_DEBUGGER
- DBG_SetCPUCallback(Automation_PCTraceCallback, true);
-#endif
+ s_automation_inline_hook = Automation_InlineHookCallback;
 }
 
 void Automation_DisableCPUHook(void)
 {
-#ifdef WANT_DEBUGGER
- DBG_SetCPUCallback(nullptr, false);
-#endif
+ s_automation_inline_hook = nullptr;
 }
 
 void Automation_SetWatchpoint(uint32 addr)
@@ -910,6 +925,10 @@ static INLINE int32 RunLoop_INLINE(EmulateSpecStruct* espec)
      DBG_SetEffTS(eff_ts);
      DBG_CPUHandler<0>();
     }
+    else if(MDFN_UNLIKELY(s_automation_inline_hook != nullptr))
+    {
+     s_automation_inline_hook();
+    }
 
     CPU[0].Step<0, EmulateICache, DebugMode>();
     CPU[0].DMA_BusTimingKludge();
@@ -1096,6 +1115,7 @@ static void Emulate(EmulateSpecStruct* espec_arg)
 
  UpdateInputLastBigTS -= (int64)end_ts * cur_clock_div * 1000 * 1000;
  //
+ automation_total_cycles += end_ts;  // Accumulate before subtracting
  SH7095_mem_timestamp -= end_ts; // Update before CPU[n].AdjustTS()
  //
  for(unsigned c = 0; c < 2; c++)
@@ -1551,6 +1571,7 @@ static void MDFN_COLD InitCommon(unsigned cpucache_emumode, unsigned horrible_ha
  }
  SH7095_mem_timestamp = 0;
  SH7095_DB = 0;
+ automation_total_cycles = 0;
 
  ss_horrible_hacks = horrible_hacks;
 

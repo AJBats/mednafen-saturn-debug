@@ -32,6 +32,12 @@
  *   call_trace_stop            - Stop call trace logging
  *   watchpoint <addr>          - Break on memory write to addr (hex), reports PC+old+new value
  *   watchpoint_clear           - Remove memory watchpoint
+ *   dump_cycle                 - Report current absolute master cycle count
+ *   run_to_cycle <N>           - Run until master cycle count reaches N then pause
+ *
+ * All ack responses include cycle=N (absolute master SH-2 cycle count, int64).
+ * This is the universal timescale for deterministic debugging — all Saturn
+ * components (CD block, slave SH-2, VDP, sound) derive their timing from it.
  *
  * Part of mednafen-saturn-debug fork.
  */
@@ -69,6 +75,7 @@ namespace MDFN_IEN_SS {
  bool Automation_CheckWatchpointActive(void);
  void CDB_EnableSCDQTrace(const char* path);
  void CDB_DisableSCDQTrace(void);
+ int64_t Automation_GetMasterCycle(void);
 }
 
 static bool automation_active = false;
@@ -127,6 +134,9 @@ static std::vector<uint32_t> breakpoints;
 // Track whether the CPU debug hook is currently enabled
 static bool cpu_hook_active = false;
 
+// Cycle-based stopping
+static int64_t run_to_cycle_target = -1;  // -1 = not active
+
 // Memory watchpoint state
 static bool watchpoint_active = false;
 static uint32_t watchpoint_addr = 0;
@@ -143,12 +153,19 @@ static uint64_t ack_seq = 0;
 // the first line (comment with sequence number) and compare to last-seen content.
 static std::string last_action_header;
 
+// Get current absolute master cycle count (for inclusion in ack messages).
+static int64_t get_cycle(void)
+{
+ return MDFN_IEN_SS::Automation_GetMasterCycle();
+}
+
 static void write_ack(const std::string& msg)
 {
  ack_seq++;
+ int64_t cyc = get_cycle();
  std::ofstream f(ack_file, std::ios::trunc);
  if (f.is_open()) {
-  f << msg << " seq=" << ack_seq << "\n";
+  f << msg << " cycle=" << cyc << " seq=" << ack_seq << "\n";
   f.close();
  }
 }
@@ -158,7 +175,8 @@ static void write_ack(const std::string& msg)
 static void update_cpu_hook(void)
 {
  // Watchpoints don't need the CPU hook — they're detected inline in BusRW_DB_CS3
- bool need = pc_trace_active || (instructions_to_step >= 0) || !breakpoints.empty();
+ bool need = pc_trace_active || (instructions_to_step >= 0) || !breakpoints.empty()
+          || (run_to_cycle_target >= 0);
  if (need && !cpu_hook_active) {
   MDFN_IEN_SS::Automation_EnableCPUHook();
   cpu_hook_active = true;
@@ -251,6 +269,7 @@ static void process_command(const std::string& line)
   frames_to_advance = n;
   instruction_paused = false;   // unblock instruction-level pause
   instructions_to_step = -1;    // cancel step mode
+  run_to_cycle_target = -1;     // cancel cycle target
   update_cpu_hook();
   write_ack("ok frame_advance " + std::to_string(n));
  }
@@ -300,6 +319,7 @@ static void process_command(const std::string& line)
   frames_to_advance = -1;  // free-run until target
   instruction_paused = false;
   instructions_to_step = -1;
+  run_to_cycle_target = -1;
   update_cpu_hook();
   write_ack("ok run_to_frame " + std::to_string(n));
  }
@@ -308,6 +328,7 @@ static void process_command(const std::string& line)
   run_to_frame_target = -1;
   instruction_paused = false;
   instructions_to_step = -1;
+  run_to_cycle_target = -1;
   update_cpu_hook();
   write_ack("ok run");
  }
@@ -427,6 +448,7 @@ static void process_command(const std::string& line)
  else if (cmd == "continue") {
   instruction_paused = false;  // unblock instruction-level pause
   instructions_to_step = -1;   // no step counting
+  run_to_cycle_target = -1;    // cancel cycle target
   // Unblock frame-level pause — will run until breakpoint or next pause command
   if (frames_to_advance == 0)
    frames_to_advance = -1;
@@ -487,6 +509,24 @@ static void process_command(const std::string& line)
   MDFN_IEN_SS::Automation_ClearWatchpoint();
   update_cpu_hook();
   write_ack("ok watchpoint_clear");
+ }
+ else if (cmd == "dump_cycle") {
+  char buf[64];
+  snprintf(buf, sizeof(buf), "ok dump_cycle value=%lld", (long long)get_cycle());
+  write_ack(buf);
+ }
+ else if (cmd == "run_to_cycle") {
+  int64_t n = 0;
+  iss >> n;
+  run_to_cycle_target = n;
+  instruction_paused = false;
+  instructions_to_step = -1;
+  if (frames_to_advance == 0)
+   frames_to_advance = -1;
+  update_cpu_hook();
+  char buf[128];
+  snprintf(buf, sizeof(buf), "ok run_to_cycle target=%lld", (long long)n);
+  write_ack(buf);
  }
  else {
   write_ack("error unknown command: " + cmd);
@@ -706,12 +746,19 @@ bool Automation_DebugHook(uint32_t pc)
   }
  }
 
+ // Check cycle target
+ bool cycle_hit = false;
+ if (run_to_cycle_target >= 0 && get_cycle() >= run_to_cycle_target) {
+  cycle_hit = true;
+  run_to_cycle_target = -1;
+ }
+
  // Instruction step countdown
  if (instructions_to_step > 0)
   instructions_to_step--;
 
  // Determine if we should pause
- bool should_pause = bp_hit || (instructions_to_step == 0);
+ bool should_pause = bp_hit || cycle_hit || (instructions_to_step == 0);
  if (!should_pause)
   return false;
 
@@ -730,6 +777,9 @@ bool Automation_DebugHook(uint32_t pc)
  if (bp_hit)
   snprintf(msg, sizeof(msg), "break pc=0x%08X addr=0x%08X frame=%llu",
    pc, pc, (unsigned long long)frame_counter);
+ else if (cycle_hit)
+  snprintf(msg, sizeof(msg), "done run_to_cycle pc=0x%08X frame=%llu",
+   real_pc, (unsigned long long)frame_counter);
  else
   snprintf(msg, sizeof(msg), "done step pc=0x%08X frame=%llu",
    real_pc, (unsigned long long)frame_counter);
