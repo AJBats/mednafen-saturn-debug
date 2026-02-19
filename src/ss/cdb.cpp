@@ -535,6 +535,7 @@ static bool TrayOpen;
 static CDInterface* Cur_CDIF;
 static CDUtility::TOC toc;
 static sscpu_timestamp_t lastts;
+static FILE* scdq_trace_file = NULL;
 static int32 CommandPhase;
 //static bool CommandYield;
 static int64 CommandClockCounter;
@@ -604,6 +605,8 @@ enum
 static int64 DriveCounter;
 static int64 PeriodicIdleCounter;
 enum : int64 { PeriodicIdleCounter_Reload = (int64)187065 << 32 };
+
+
 
 static int32 PauseCounter;
 static bool PlaySectorProcessed;
@@ -2508,7 +2511,28 @@ static void Drive_Run(int64 clocks)
    SubCodeQBuf[9] = CurPosInfo.fad >> 0;
 
    TriggerIRQ(HIRQ_SCDQ);
+   if(MDFN_UNLIKELY(scdq_trace_file))
+    fprintf(scdq_trace_file, "SET %d %d 0x%04X\n", (int)lastts, (int)CurPosInfo.status, (unsigned)HIRQ);
   }
+}
+
+void CDB_EnableSCDQTrace(const char* path)
+{
+ if(scdq_trace_file)
+  fclose(scdq_trace_file);
+ scdq_trace_file = fopen(path, "w");
+ if(scdq_trace_file)
+  fprintf(scdq_trace_file, "# SCDQ trace: SET <sh2_ts> <drv_status> <hirq_after>  |  READ <sh2_ts> <hirq_val>\n");
+}
+
+void CDB_DisableSCDQTrace(void)
+{
+ if(scdq_trace_file)
+ {
+  fflush(scdq_trace_file);
+  fclose(scdq_trace_file);
+  scdq_trace_file = NULL;
+ }
 }
 
 void CDB_GetCDDA(uint16* outbuf)
@@ -4124,6 +4148,9 @@ uint16 CDB_Read(uint32 offset)
 
   case 0x2:	// HIRQ
 	ret = HIRQ;
+	// READ trace omitted: ~10k HIRQ reads/frame would produce ~10k fprintf/frame,
+	// creating observer effect via real-time I/O overhead changing disc scheduling.
+	// SET trace (in Drive_Run) is sufficient: logs SCDQ fires + drive state.
 	break;
 
   case 0x3:	// HIRQ mask

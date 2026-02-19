@@ -65,6 +65,9 @@ enum
 uint32 CDB_GetRegister(const unsigned id, char* const special, const uint32 special_len) MDFN_COLD;
 void CDB_SetRegister(const unsigned id, const uint32 value) MDFN_COLD;
 
+void CDB_EnableSCDQTrace(const char* path);
+void CDB_DisableSCDQTrace(void);
+
 }
 
 #endif

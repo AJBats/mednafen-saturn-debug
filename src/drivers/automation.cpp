@@ -67,6 +67,8 @@ namespace MDFN_IEN_SS {
  void Automation_SetWatchpoint(uint32 addr);
  void Automation_ClearWatchpoint(void);
  bool Automation_CheckWatchpointActive(void);
+ void CDB_EnableSCDQTrace(const char* path);
+ void CDB_DisableSCDQTrace(void);
 }
 
 static bool automation_active = false;
@@ -452,6 +454,20 @@ static void process_command(const std::string& line)
  else if (cmd == "call_trace_stop") {
   MDFN_IEN_SS::Automation_DisableCallTrace();
   write_ack("ok call_trace_stop");
+ }
+ else if (cmd == "scdq_trace") {
+  std::string path;
+  iss >> path;
+  if (path.empty()) {
+   write_ack("error scdq_trace: no path");
+  } else {
+   MDFN_IEN_SS::CDB_EnableSCDQTrace(path.c_str());
+   write_ack("ok scdq_trace " + path);
+  }
+ }
+ else if (cmd == "scdq_trace_stop") {
+  MDFN_IEN_SS::CDB_DisableSCDQTrace();
+  write_ack("ok scdq_trace_stop");
  }
  else if (cmd == "watchpoint") {
   uint32_t addr = 0;
