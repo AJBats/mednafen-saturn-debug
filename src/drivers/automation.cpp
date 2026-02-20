@@ -67,6 +67,8 @@ namespace MDFN_IEN_SS {
  uint8 Automation_ReadMem8(uint32 addr);
  std::string Automation_DumpRegs(void);
  void Automation_DumpRegsBin(const char* path);
+ std::string Automation_DumpSlaveRegs(void);
+ void Automation_DumpSlaveRegsBin(const char* path);
  void Automation_EnableCPUHook(void);
  void Automation_DisableCPUHook(void);
  uint32 Automation_GetMasterPC(void);
@@ -378,6 +380,19 @@ static void process_command(const std::string& line)
   } else {
    MDFN_IEN_SS::Automation_DumpRegsBin(path.c_str());
    write_ack("ok dump_regs_bin " + path);
+  }
+ }
+ else if (cmd == "dump_slave_regs") {
+  write_ack(MDFN_IEN_SS::Automation_DumpSlaveRegs());
+ }
+ else if (cmd == "dump_slave_regs_bin") {
+  std::string path;
+  iss >> path;
+  if (path.empty()) {
+   write_ack("error dump_slave_regs_bin: no path");
+  } else {
+   MDFN_IEN_SS::Automation_DumpSlaveRegsBin(path.c_str());
+   write_ack("ok dump_slave_regs_bin " + path);
   }
  }
  else if (cmd == "dump_mem_bin") {

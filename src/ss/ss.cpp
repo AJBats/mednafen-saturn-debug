@@ -606,6 +606,48 @@ void Automation_DumpRegsBin(const char* path)
  }
 }
 
+// Automation: dump slave SH-2 CPU registers as a formatted string.
+std::string Automation_DumpSlaveRegs(void)
+{
+ std::string s = "regs_slave";
+ char buf[64];
+
+ for (int i = 0; i < 16; i++) {
+  snprintf(buf, sizeof(buf), " R%d=%08X", i, CPU[1].R[i]);
+  s += buf;
+ }
+
+ snprintf(buf, sizeof(buf), " PC=%08X", CPU[1].PC); s += buf;
+ snprintf(buf, sizeof(buf), " SR=%08X", CPU[1].SR); s += buf;
+ snprintf(buf, sizeof(buf), " PR=%08X", CPU[1].PR); s += buf;
+ snprintf(buf, sizeof(buf), " GBR=%08X", CPU[1].GBR); s += buf;
+ snprintf(buf, sizeof(buf), " VBR=%08X", CPU[1].VBR); s += buf;
+ snprintf(buf, sizeof(buf), " MACH=%08X", CPU[1].MACH); s += buf;
+ snprintf(buf, sizeof(buf), " MACL=%08X", CPU[1].MACL); s += buf;
+
+ return s;
+}
+
+// Automation: dump slave SH-2 CPU registers to a binary file.
+void Automation_DumpSlaveRegsBin(const char* path)
+{
+ uint32 regs[22];
+ for (int i = 0; i < 16; i++)
+  regs[i] = CPU[1].R[i];
+ regs[16] = CPU[1].PC;
+ regs[17] = CPU[1].SR;
+ regs[18] = CPU[1].PR;
+ regs[19] = CPU[1].GBR;
+ regs[20] = CPU[1].VBR;
+ regs[21] = CPU[1].MACH;
+
+ FILE* f = fopen(path, "wb");
+ if (f) {
+  fwrite(regs, 4, 22, f);
+  fclose(f);
+ }
+}
+
 // Automation: passive inline hook callback.
 // Called from RunLoop_INLINE on every master CPU instruction when active.
 // Does NOT go through DebugMode/DBG_CPUHandler/ForceEventUpdates — zero
