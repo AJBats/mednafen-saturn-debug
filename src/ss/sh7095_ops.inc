@@ -1498,7 +1498,11 @@ switch(Pipe_ID >> 24)
  BEGIN_OP_DLYIDIF(BSR)
 	PR = PC;
 	if(MDFN_UNLIKELY(CallTraceFile != nullptr))
-	 fprintf(CallTraceFile, "%c %08X %08X\n", which ? 'S' : 'M', PC - 4, (uint32)(PC + ((uint32)sign_x_to_s32(12, instr) << 1)));
+	{
+	 Automation_InsnTraceCheckStop();
+	 fprintf(CallTraceFile, "%u %c %08X %08X\n", (unsigned)timestamp, which ? 'S' : 'M', PC - 4, (uint32)(PC + ((uint32)sign_x_to_s32(12, instr) << 1)));
+	 Automation_UnifiedLineWritten();
+	}
 
 	UCRelDelayBranch((uint32)sign_x_to_s32(12, instr) << 1);
  END_OP
@@ -1510,7 +1514,11 @@ switch(Pipe_ID >> 24)
  BEGIN_OP_DLYIDIF(BSRF_REG)
 	PR = PC;
 	if(MDFN_UNLIKELY(CallTraceFile != nullptr))
-	 fprintf(CallTraceFile, "%c %08X %08X\n", which ? 'S' : 'M', PC - 4, (uint32)(PC + R[instr_nyb2]));
+	{
+	 Automation_InsnTraceCheckStop();
+	 fprintf(CallTraceFile, "%u %c %08X %08X\n", (unsigned)timestamp, which ? 'S' : 'M', PC - 4, (uint32)(PC + R[instr_nyb2]));
+	 Automation_UnifiedLineWritten();
+	}
 
 	UCRelDelayBranch(R[instr_nyb2]);
  END_OP
@@ -1530,7 +1538,11 @@ switch(Pipe_ID >> 24)
  BEGIN_OP_DLYIDIF(JSR_REGINDIR)
 	PR = PC;
 	if(MDFN_UNLIKELY(CallTraceFile != nullptr))
-	 fprintf(CallTraceFile, "%c %08X %08X\n", which ? 'S' : 'M', PC - 4, R[instr_nyb2]);
+	{
+	 Automation_InsnTraceCheckStop();
+	 fprintf(CallTraceFile, "%u %c %08X %08X\n", (unsigned)timestamp, which ? 'S' : 'M', PC - 4, R[instr_nyb2]);
+	 Automation_UnifiedLineWritten();
+	}
 
 	UCDelayBranch(R[instr_nyb2]);
  END_OP

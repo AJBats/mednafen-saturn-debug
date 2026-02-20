@@ -30,6 +30,8 @@
  *   continue                   - Resume execution (until next breakpoint or frame end)
  *   call_trace <path>          - Start logging JSR/BSR/BSRF calls to text file
  *   call_trace_stop            - Stop call trace logging
+ *   cdb_trace <path>           - Start logging CD Block events (commands, drive phases, HIRQ, buffers)
+ *   cdb_trace_stop             - Stop CD Block trace logging
  *   watchpoint <addr>          - Break on memory write to addr (hex), reports PC+old+new value
  *   watchpoint_clear           - Remove memory watchpoint
  *   dump_cycle                 - Report current absolute master cycle count
@@ -75,9 +77,19 @@ namespace MDFN_IEN_SS {
  bool Automation_CheckWatchpointActive(void);
  void CDB_EnableSCDQTrace(const char* path);
  void CDB_DisableSCDQTrace(void);
+ void CDB_EnableCDBTrace(const char* path);
+ void CDB_DisableCDBTrace(void);
+ void CDB_SetCDBTraceFile(FILE* f);
+ void CDB_ClearCDBTraceFile(void);
+ void Automation_SetCallTraceFile(FILE* f);
+ void Automation_ClearCallTraceFile(void);
  int64_t Automation_GetMasterCycle(void);
+ void Automation_SetDeterministic(void);
+ void Automation_EnableInsnTrace(const char* path, int64_t start_line, int64_t stop_line);
+ void Automation_DisableInsnTrace(void);
 }
 
+static FILE* unified_trace_file = nullptr;
 static bool automation_active = false;
 static std::string action_file;
 static std::string ack_file;
@@ -491,6 +503,55 @@ static void process_command(const std::string& line)
   MDFN_IEN_SS::CDB_DisableSCDQTrace();
   write_ack("ok scdq_trace_stop");
  }
+ else if (cmd == "cdb_trace") {
+  std::string path;
+  iss >> path;
+  if (path.empty()) {
+   write_ack("error cdb_trace: no path");
+  } else {
+   MDFN_IEN_SS::CDB_EnableCDBTrace(path.c_str());
+   write_ack("ok cdb_trace " + path);
+  }
+ }
+ else if (cmd == "cdb_trace_stop") {
+  MDFN_IEN_SS::CDB_DisableCDBTrace();
+  write_ack("ok cdb_trace_stop");
+ }
+ else if (cmd == "unified_trace") {
+  std::string path;
+  iss >> path;
+  if (path.empty()) {
+   write_ack("error unified_trace: no path");
+  } else {
+   // Stop any existing unified trace
+   if (unified_trace_file) {
+    MDFN_IEN_SS::Automation_ClearCallTraceFile();
+    MDFN_IEN_SS::CDB_ClearCDBTraceFile();
+    fclose(unified_trace_file);
+    unified_trace_file = nullptr;
+   }
+   unified_trace_file = fopen(path.c_str(), "w");
+   if (unified_trace_file) {
+    fprintf(unified_trace_file, "# Unified trace: <sh2_cycle> <source> <details>\n"
+      "# M/S = SH-2 master/slave call, CMD/DRV/IRQ/BUF = CD Block\n");
+    MDFN_IEN_SS::Automation_SetCallTraceFile(unified_trace_file);
+    MDFN_IEN_SS::CDB_SetCDBTraceFile(unified_trace_file);
+    write_ack("ok unified_trace " + path);
+   } else {
+    write_ack("error unified_trace: failed to open " + path);
+   }
+  }
+ }
+ else if (cmd == "unified_trace_stop") {
+  MDFN_IEN_SS::Automation_ClearCallTraceFile();
+  MDFN_IEN_SS::CDB_ClearCDBTraceFile();
+  if (unified_trace_file) {
+   fflush(unified_trace_file);
+   fclose(unified_trace_file);
+   unified_trace_file = nullptr;
+  }
+  write_ack("ok unified_trace_stop");
+ }
  else if (cmd == "watchpoint") {
   uint32_t addr = 0;
   iss >> std::hex >> addr;
@@ -509,6 +570,27 @@ static void process_command(const std::string& line)
   MDFN_IEN_SS::Automation_ClearWatchpoint();
   update_cpu_hook();
   write_ack("ok watchpoint_clear");
+ }
+ else if (cmd == "deterministic") {
+  MDFN_IEN_SS::Automation_SetDeterministic();
+  write_ack("ok deterministic");
+ }
+ else if (cmd == "insn_trace") {
+  std::string path;
+  int64_t start_line = 0, stop_line = 0;
+  iss >> path >> start_line >> stop_line;
+  if (path.empty() || start_line <= 0 || stop_line <= 0) {
+   write_ack("error insn_trace: usage: insn_trace <path> <start_line> <stop_line>");
+  } else {
+   MDFN_IEN_SS::Automation_EnableInsnTrace(path.c_str(), start_line, stop_line);
+   char buf[256];
+   snprintf(buf, sizeof(buf), "ok insn_trace %s start=%lld stop=%lld", path.c_str(), (long long)start_line, (long long)stop_line);
+   write_ack(buf);
+  }
+ }
+ else if (cmd == "insn_trace_stop") {
+  MDFN_IEN_SS::Automation_DisableInsnTrace();
+  write_ack("ok insn_trace_stop");
  }
  else if (cmd == "dump_cycle") {
   char buf[64];

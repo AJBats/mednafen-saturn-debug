@@ -68,6 +68,11 @@ void CDB_SetRegister(const unsigned id, const uint32 value) MDFN_COLD;
 void CDB_EnableSCDQTrace(const char* path);
 void CDB_DisableSCDQTrace(void);
 
+void CDB_EnableCDBTrace(const char* path);
+void CDB_DisableCDBTrace(void);
+void CDB_SetCDBTraceFile(FILE* f);
+void CDB_ClearCDBTraceFile(void);
+
 }
 
 #endif

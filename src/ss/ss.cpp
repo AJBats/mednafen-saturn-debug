@@ -665,6 +665,119 @@ void Automation_DisableCallTrace(void)
  CPU[1].CallTraceFile = nullptr;
 }
 
+static bool call_trace_external = false;
+
+void Automation_SetCallTraceFile(FILE* f)
+{
+ // Close any self-owned trace first
+ if(CPU[0].CallTraceFile && !call_trace_external)
+  fclose(CPU[0].CallTraceFile);
+ CPU[0].CallTraceFile = f;
+ CPU[1].CallTraceFile = f;
+ call_trace_external = (f != nullptr);
+}
+
+void Automation_ClearCallTraceFile(void)
+{
+ if(CPU[0].CallTraceFile && !call_trace_external)
+  fclose(CPU[0].CallTraceFile);
+ CPU[0].CallTraceFile = nullptr;
+ CPU[1].CallTraceFile = nullptr;
+ call_trace_external = false;
+}
+
+// Per-instruction trace: log every CPU instruction between two unified trace events.
+// Triggered by unified trace line count reaching a threshold.
+static int64_t s_unified_line_count = 0;
+static int64_t s_insn_trace_start_line = -1;
+static int64_t s_insn_trace_stop_line = -1;
+static bool s_insn_trace_active = false;
+static FILE* s_insn_trace_file = nullptr;
+
+// Called after every line written to the unified trace file.
+void Automation_UnifiedLineWritten(void)
+{
+ s_unified_line_count++;
+
+ // Start trigger
+ if(s_insn_trace_start_line >= 0 && s_unified_line_count == s_insn_trace_start_line && !s_insn_trace_active)
+ {
+  s_insn_trace_active = true;
+  CPU[0].InsnTraceFile = s_insn_trace_file;
+  CPU[1].InsnTraceFile = s_insn_trace_file;
+  if(s_insn_trace_file)
+   fprintf(s_insn_trace_file, "# INSN TRACE START after unified line %lld\n", (long long)s_unified_line_count);
+ }
+
+ // Stop trigger
+ if(s_insn_trace_active && s_insn_trace_stop_line >= 0 && s_unified_line_count >= s_insn_trace_stop_line)
+ {
+  if(s_insn_trace_file)
+  {
+   fprintf(s_insn_trace_file, "# INSN TRACE STOP at unified line %lld\n", (long long)s_unified_line_count);
+   fflush(s_insn_trace_file);
+  }
+  s_insn_trace_active = false;
+  CPU[0].InsnTraceFile = nullptr;
+  CPU[1].InsnTraceFile = nullptr;
+ }
+}
+
+// Called from BSR/JSR/BSRF handlers — just delegates to UnifiedLineWritten check.
+void Automation_InsnTraceCheckStop(void)
+{
+ // No-op now; stop logic moved to UnifiedLineWritten
+}
+
+void Automation_EnableInsnTrace(const char* path, int64_t start_line, int64_t stop_line)
+{
+ if(s_insn_trace_file) { fclose(s_insn_trace_file); s_insn_trace_file = nullptr; }
+ s_insn_trace_file = fopen(path, "w");
+ s_insn_trace_start_line = start_line;
+ s_insn_trace_stop_line = stop_line;
+ s_insn_trace_active = false;
+ // Start at 2 to account for the 2-line header in the unified trace file.
+ // This way the counter matches the file line number exactly.
+ s_unified_line_count = 2;
+ CPU[0].InsnTraceFile = nullptr;
+ CPU[1].InsnTraceFile = nullptr;
+ if(s_insn_trace_file)
+ {
+  fprintf(s_insn_trace_file, "# Per-instruction trace, lines %lld to %lld\n", (long long)start_line, (long long)stop_line);
+  fprintf(s_insn_trace_file, "# Format: timestamp M/S PC opcode\n");
+  fflush(s_insn_trace_file);
+ }
+}
+
+void Automation_DisableInsnTrace(void)
+{
+ s_insn_trace_active = false;
+ CPU[0].InsnTraceFile = nullptr;
+ CPU[1].InsnTraceFile = nullptr;
+ if(s_insn_trace_file) { fclose(s_insn_trace_file); s_insn_trace_file = nullptr; }
+ s_insn_trace_start_line = -1;
+ s_insn_trace_stop_line = -1;
+}
+
+// Automation: enable deterministic mode.
+// Resets all non-deterministic emulator state to fixed values so that
+// identical inputs always produce identical traces.
+// Currently handles: SMPC RTC (host wall-clock seeding).
+void Automation_SetDeterministic(void)
+{
+ // Reset RTC to a fixed time (2000-01-01 00:00:00, Saturday).
+ // This overrides the Time::LocalTime() value set during init.
+ struct tm fixed_time = {};
+ fixed_time.tm_year = 100; // 2000
+ fixed_time.tm_mon  = 0;   // January
+ fixed_time.tm_mday = 1;
+ fixed_time.tm_hour = 0;
+ fixed_time.tm_min  = 0;
+ fixed_time.tm_sec  = 0;
+ fixed_time.tm_wday = 6;   // Saturday
+ SMPC_SetRTC(&fixed_time, 1); // lang=1 (English)
+}
+
 #include "sh7095.inc"
 
 //

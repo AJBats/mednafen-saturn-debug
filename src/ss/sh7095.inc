@@ -3456,6 +3456,9 @@ INLINE void SH7095::Step(void)
   FRT_WDT_Recalc_NET();
  }
 
+ if(MDFN_UNLIKELY(InsnTraceFile != nullptr))
+  fprintf(InsnTraceFile, "%u %c %08X %04X\n", (unsigned)timestamp, which ? 'S' : 'M', PC - 4, (uint16)Pipe_ID);
+
  const uint32 instr = (uint16)Pipe_ID;
  const unsigned instr_nyb1 = (instr >> 4) & 0xF;
  const unsigned instr_nyb2 = (instr >> 8) & 0xF;

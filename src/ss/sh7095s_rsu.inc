@@ -42,6 +42,9 @@
    FRT_WDT_Recalc_NET();
   }
 
+  if(MDFN_UNLIKELY(InsnTraceFile != nullptr))
+   fprintf(InsnTraceFile, "%u S %08X %04X\n", (unsigned)timestamp, PC - 4, (uint16)Pipe_ID);
+
   instr = (uint16)Pipe_ID;
   //
   #include "sh7095_ops.inc"

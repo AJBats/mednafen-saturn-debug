@@ -145,6 +145,9 @@ using namespace CDUtility;
 namespace MDFN_IEN_SS
 {
 
+// Defined in ss.cpp — per-instruction trace line counter
+extern void Automation_UnifiedLineWritten(void);
+
 static void CheckBufPauseResume(void);
 static void StartSeek(const uint32 cmd_target, const uint32 cur_play_end = 0x800000, const uint32 cur_play_repeat = 0, const uint32 play_end_irq_type = 0, const bool no_pickup_change = false);
 static void ClearPendingSec(void);
@@ -536,6 +539,7 @@ static CDInterface* Cur_CDIF;
 static CDUtility::TOC toc;
 static sscpu_timestamp_t lastts;
 static FILE* scdq_trace_file = NULL;
+static FILE* cdb_trace_file = NULL;
 static int32 CommandPhase;
 //static bool CommandYield;
 static int64 CommandClockCounter;
@@ -605,6 +609,80 @@ enum
 static int64 DriveCounter;
 static int64 PeriodicIdleCounter;
 enum : int64 { PeriodicIdleCounter_Reload = (int64)187065 << 32 };
+
+static const char* DrivePhase_Name(int phase)
+{
+ switch(phase)
+ {
+  case DRIVEPHASE_STOPPED:        return "STOPPED";
+  case DRIVEPHASE_PLAY:           return "PLAY";
+  case DRIVEPHASE_SEEK_START3:    return "SEEK_START3";
+  case DRIVEPHASE_SEEK:           return "SEEK";
+  case DRIVEPHASE_SCAN:           return "SCAN";
+  case DRIVEPHASE_EJECTED0:       return "EJECTED0";
+  case DRIVEPHASE_EJECTED1:       return "EJECTED1";
+  case DRIVEPHASE_EJECTED_WAITING:return "EJECTED_WAIT";
+  case DRIVEPHASE_STARTUP:        return "STARTUP";
+  case DRIVEPHASE_RESETTING:      return "RESETTING";
+  case DRIVEPHASE_SEEK_START1:    return "SEEK_START1";
+  case DRIVEPHASE_SEEK_START2:    return "SEEK_START2";
+  case DRIVEPHASE_PAUSE:          return "PAUSE";
+  default:                        return "UNKNOWN";
+ }
+}
+
+static void CDBTrace_HIRQ(const char* tag, unsigned old_hirq, unsigned new_hirq)
+{
+ if(MDFN_UNLIKELY(cdb_trace_file))
+ {
+  unsigned changed = old_hirq ^ new_hirq;
+  char bits[128];
+  bits[0] = 0;
+  if(changed & HIRQ_CMOK) strcat(bits, " CMOK");
+  if(changed & HIRQ_DRDY) strcat(bits, " DRDY");
+  if(changed & HIRQ_CSCT) strcat(bits, " CSCT");
+  if(changed & HIRQ_BFUL) strcat(bits, " BFUL");
+  if(changed & HIRQ_PEND) strcat(bits, " PEND");
+  if(changed & HIRQ_DCHG) strcat(bits, " DCHG");
+  if(changed & HIRQ_ESEL) strcat(bits, " ESEL");
+  if(changed & HIRQ_EHST) strcat(bits, " EHST");
+  if(changed & HIRQ_ECPY) strcat(bits, " ECPY");
+  if(changed & HIRQ_EFLS) strcat(bits, " EFLS");
+  if(changed & HIRQ_SCDQ) strcat(bits, " SCDQ");
+  if(changed & HIRQ_MPED) strcat(bits, " MPED");
+  if(changed & HIRQ_MPCM) strcat(bits, " MPCM");
+  if(changed & HIRQ_MPST) strcat(bits, " MPST");
+  fprintf(cdb_trace_file, "%u IRQ %s 0x%04X->0x%04X%s\n",
+    (unsigned)lastts, tag, old_hirq, new_hirq, bits);
+  Automation_UnifiedLineWritten();
+ }
+}
+
+static void CDBTrace_DrivePhase(int old_phase, int new_phase)
+{
+ if(MDFN_UNLIKELY(cdb_trace_file))
+ {
+  fprintf(cdb_trace_file, "%u DRV %s->%s sector=%u free=%d\n",
+    (unsigned)lastts, DrivePhase_Name(old_phase), DrivePhase_Name(new_phase),
+    CurSector, FreeBufferCount);
+  Automation_UnifiedLineWritten();
+ }
+}
+
+static void CDBTrace_Buf(const char* op, uint8 bfi, uint32 fad)
+{
+ if(MDFN_UNLIKELY(cdb_trace_file))
+ {
+  fprintf(cdb_trace_file, "%u BUF %s idx=%d fad=0x%06X free=%d\n",
+    (unsigned)lastts, op, bfi, fad, FreeBufferCount);
+  Automation_UnifiedLineWritten();
+ }
+}
+
+#define SET_DRIVE_PHASE(new_ph) do { \
+ if(MDFN_UNLIKELY(cdb_trace_file)) CDBTrace_DrivePhase(DrivePhase, (new_ph)); \
+ DrivePhase = (new_ph); \
+} while(0)
 
 
 
@@ -745,6 +823,9 @@ static uint8 Buffer_Allocate(const bool zero_clear)
 
  FreeBufferCount--;
 
+ if(MDFN_UNLIKELY(cdb_trace_file))
+  CDBTrace_Buf("ALLOC", bfsidx, CurPosInfo.fad);
+
  //
  Buffers[bfsidx].Prev = 0xFF;
  Buffers[bfsidx].Next = 0xFF;
@@ -770,6 +851,9 @@ static void Buffer_Free(const uint8 bfsidx)
 
  FreeBufferCount++;
  FirstFreeBuf = bfsidx;
+
+ if(MDFN_UNLIKELY(cdb_trace_file))
+  CDBTrace_Buf("FREE", bfsidx, 0);
 }
 
 static void Partition_LinkBuffer(const unsigned pnum, const unsigned bfsidx)
@@ -1482,7 +1566,7 @@ static void SWReset(void)
 void CDB_ResetCD(void)	// TODO
 {
  PeriodicIdleCounter = 0x7FFFFFFFFFFFFFFFLL;
- DrivePhase = DRIVEPHASE_RESETTING;
+ SET_DRIVE_PHASE(DRIVEPHASE_RESETTING);
  DriveCounter = 0x7FFFFFFFFFFFFFFFLL;
 
  Results[0] = 0;
@@ -1525,7 +1609,7 @@ void CDB_SetDisc(bool tray_open, CDInterface* cdif)
   if(DrivePhase != DRIVEPHASE_RESETTING)
   {
    AuthDiscType = 0x00;
-   DrivePhase = DRIVEPHASE_EJECTED0;
+   SET_DRIVE_PHASE(DRIVEPHASE_EJECTED0);
    DriveCounter = (int64)1000 << 32;
   }
  }
@@ -1643,7 +1727,11 @@ void CDB_Reset(bool powering_up)
 
 static INLINE void TriggerIRQ(unsigned bs)
 {
+ unsigned old_hirq = HIRQ;
  HIRQ |= bs;
+
+ if(MDFN_UNLIKELY(cdb_trace_file) && (old_hirq != HIRQ))
+  CDBTrace_HIRQ("SET", old_hirq, HIRQ);
 
  RecalcIRQOut();
 }
@@ -1951,7 +2039,7 @@ static void SeekStart2(int delay_sub = 0)
  CurPosInfo.status = STATUS_BUSY;
  CurPosInfo.is_cdrom = false;
  CurPosInfo.repcount = PlayRepeatCounter & 0xF;
- DrivePhase = DRIVEPHASE_SEEK_START3;
+ SET_DRIVE_PHASE(DRIVEPHASE_SEEK_START3);
 
  Cur_CDIF->HintReadSector(CurPosInfo.fad - 150);
 
@@ -2038,7 +2126,7 @@ static void StartScan(bool mode)
 
  if(DrivePhase != DRIVEPHASE_PLAY)
  {
-  DrivePhase = DRIVEPHASE_SEEK_START2;
+  SET_DRIVE_PHASE(DRIVEPHASE_SEEK_START2);
   DriveCounter = (int64)SeekCPIUpdateDelay << 32;
  }
 }
@@ -2092,7 +2180,7 @@ static void CheckBufPauseResume(void)
 #else
    SecPreBuf_In = false;
    CurPosInfo.status = STATUS_BUSY;
-   DrivePhase = DRIVEPHASE_SEEK_START2;
+   SET_DRIVE_PHASE(DRIVEPHASE_SEEK_START2);
    DriveCounter = (int64)SeekCPIUpdateDelay << 32;
    PeriodicIdleCounter = PeriodicIdleCounter_Reload;
 #endif
@@ -2149,13 +2237,13 @@ static void Drive_Run(int64 clocks)
 	CurPosInfo.repcount = 0x7F;
 	TriggerIRQ(HIRQ_DCHG);
 
-	DrivePhase = DRIVEPHASE_EJECTED1;
+	SET_DRIVE_PHASE(DRIVEPHASE_EJECTED1);
 	DriveCounter = (int64)4000 << 32;
 	break;
 
     case DRIVEPHASE_EJECTED1:
 	TriggerIRQ(HIRQ_EFLS);
-	DrivePhase = DRIVEPHASE_EJECTED_WAITING;
+	SET_DRIVE_PHASE(DRIVEPHASE_EJECTED_WAITING);
 	DriveCounter = (int64)1 << 32;
 	break;
 
@@ -2163,7 +2251,7 @@ static void Drive_Run(int64 clocks)
 	if(Cur_CDIF)
 	{
          CurPosInfo.status = STATUS_BUSY;
-	 DrivePhase = DRIVEPHASE_STARTUP;
+	 SET_DRIVE_PHASE(DRIVEPHASE_STARTUP);
 	 DriveCounter = (int64)(1 * 44100 * 256) << 32;
 	}
 	else
@@ -2210,7 +2298,7 @@ static void Drive_Run(int64 clocks)
 	 //printf("%d %d\n", fad_delta, seek_time);
 
 	 CurPosInfo.status = STATUS_SEEK;
-	 DrivePhase = DRIVEPHASE_SEEK;
+	 SET_DRIVE_PHASE(DRIVEPHASE_SEEK);
 	 DriveCounter += (int64)seek_time << 32;
 	 CurSector = CurPosInfo.fad;
 	 SubQBuf_Safe_Valid = false;
@@ -2279,12 +2367,12 @@ static void Drive_Run(int64 clocks)
 	  if(index_ok)
 	  {
 	   PlaySectorProcessed = false;
-	   DrivePhase = DRIVEPHASE_PLAY;
+	   SET_DRIVE_PHASE(DRIVEPHASE_PLAY);
 	   DriveCounter += (int64)((44100 * 256) / ((SubQBuf_Safe[0] & 0x40) ? 150 : 75)) << 32;
 
 #if 0
 	   if(!Cur_CDIF->NonDeterministic_CheckSectorReady(CurSector - 150))
-	    DrivePhase = DRIVEPHASE_SEEK;
+	    SET_DRIVE_PHASE(DRIVEPHASE_SEEK);
 #endif
 	  }
 	  //else
@@ -2428,7 +2516,7 @@ static void Drive_Run(int64 clocks)
       {
        SS_DBG(SS_DBG_CDB, "[CDB] Resuming from buffer full pause.\n");
        CurPosInfo.status = STATUS_BUSY;
-       DrivePhase = DRIVEPHASE_SEEK_START2;
+       SET_DRIVE_PHASE(DRIVEPHASE_SEEK_START2);
        DriveCounter = (int64)SeekCPIUpdateDelay << 32;
       }
      }
@@ -2447,7 +2535,7 @@ static void Drive_Run(int64 clocks)
 
       CurSector = CurPosInfo.fad;
       CurPosInfo.status = STATUS_BUSY;
-      DrivePhase = DRIVEPHASE_PAUSE;
+      SET_DRIVE_PHASE(DRIVEPHASE_PAUSE);
       PauseCounter = PlayEndIRQType ? 0 : 1;
      }
      else
@@ -2466,7 +2554,7 @@ static void Drive_Run(int64 clocks)
      SS_DBG(SS_DBG_CDB, "[CDB] Starting buffer full pause.\n");
      SecPreBuf_In = false;
      CurPosInfo.status = STATUS_BUSY;
-     DrivePhase = DRIVEPHASE_PAUSE;
+     SET_DRIVE_PHASE(DRIVEPHASE_PAUSE);
      PauseCounter = 0;
     }
     else
@@ -2533,6 +2621,45 @@ void CDB_DisableSCDQTrace(void)
   fclose(scdq_trace_file);
   scdq_trace_file = NULL;
  }
+}
+
+void CDB_EnableCDBTrace(const char* path)
+{
+ if(cdb_trace_file)
+  fclose(cdb_trace_file);
+ cdb_trace_file = fopen(path, "w");
+ if(cdb_trace_file)
+  fprintf(cdb_trace_file, "# CDB trace: <sh2_cycle> <type> <details>\n"
+    "# CMD = command from game, DRV = drive phase change, IRQ = HIRQ change, BUF = buffer op\n");
+}
+
+void CDB_DisableCDBTrace(void)
+{
+ if(cdb_trace_file)
+ {
+  fflush(cdb_trace_file);
+  fclose(cdb_trace_file);
+  cdb_trace_file = NULL;
+ }
+}
+
+static bool cdb_trace_external = false;
+
+void CDB_SetCDBTraceFile(FILE* f)
+{
+ // Close any self-owned trace first
+ if(cdb_trace_file && !cdb_trace_external)
+  fclose(cdb_trace_file);
+ cdb_trace_file = f;
+ cdb_trace_external = (f != NULL);
+}
+
+void CDB_ClearCDBTraceFile(void)
+{
+ if(cdb_trace_file && !cdb_trace_external)
+  fclose(cdb_trace_file);
+ cdb_trace_file = NULL;
+ cdb_trace_external = false;
 }
 
 void CDB_GetCDDA(uint16* outbuf)
@@ -2614,6 +2741,15 @@ sscpu_timestamp_t CDB_Update(sscpu_timestamp_t timestamp)
      char cdet[128];
      GetCommandDetails(CTR.CD, cdet, sizeof(cdet));
      SS_DBG(SS_DBG_CDB, "[CDB] Command: %s --- HIRQ=0x%04x, HIRQ_Mask=0x%04x --- %u\n", cdet, HIRQ, HIRQ_Mask, timestamp);
+    }
+    if(MDFN_UNLIKELY(cdb_trace_file))
+    {
+     char cdet[128];
+     GetCommandDetails(CTR.CD, cdet, sizeof(cdet));
+     fprintf(cdb_trace_file, "%u CMD %s HIRQ=0x%04X drv=%s status=%d fad=0x%06X free=%d\n",
+       (unsigned)lastts, cdet, HIRQ, DrivePhase_Name(DrivePhase),
+       (int)CurPosInfo.status, CurPosInfo.fad, FreeBufferCount);
+     Automation_UnifiedLineWritten();
     }
     //
     //
@@ -2861,7 +2997,7 @@ sscpu_timestamp_t CDB_Update(sscpu_timestamp_t timestamp)
       CurPosInfo.idx = 0xFF;
       CurPosInfo.tno = 0xFF;
 
-      DrivePhase = DRIVEPHASE_STOPPED;
+      SET_DRIVE_PHASE(DRIVEPHASE_STOPPED);
       DriveCounter = (int64)380000 << 32;
      }
      else if(cmd_sp == 0xFFFFFF) // Pause
@@ -4046,7 +4182,7 @@ sscpu_timestamp_t CDB_Update(sscpu_timestamp_t timestamp)
     ScanCounter = 0;
 
     DriveCounter = (int64)1000 << 32;
-    DrivePhase = DRIVEPHASE_EJECTED_WAITING;
+    SET_DRIVE_PHASE(DRIVEPHASE_EJECTED_WAITING);
 
     memset(TOC_Buffer, 0xFF, sizeof(TOC_Buffer));	// TODO: confirm 0xFF(or 0x00?)
 
@@ -4216,8 +4352,13 @@ void CDB_Write_DBM(uint32 offset, uint16 DB, uint16 mask)
 	break;
 
   case 0x2:
-	HIRQ = HIRQ & (DB | ~mask);
-	RecalcIRQOut();
+	{
+	 unsigned old_hirq = HIRQ;
+	 HIRQ = HIRQ & (DB | ~mask);
+	 if(MDFN_UNLIKELY(cdb_trace_file) && (old_hirq != HIRQ))
+	  CDBTrace_HIRQ("CLR", old_hirq, HIRQ);
+	 RecalcIRQOut();
+	}
 	break;
 
   case 0x3:
@@ -4449,7 +4590,7 @@ void CDB_StateAction(StateMem* sm, const unsigned load, const bool data_only)
    if(CurPosInfo.status == STATUS_PAUSE && DrivePhase == DRIVEPHASE_PLAY)
    {
     //printf("Pause fixup.\n");
-    DrivePhase = DRIVEPHASE_PAUSE;
+    SET_DRIVE_PHASE(DRIVEPHASE_PAUSE);
     PauseCounter = -1;
    }
   }

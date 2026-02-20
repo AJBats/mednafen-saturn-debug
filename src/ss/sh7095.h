@@ -120,6 +120,9 @@ class SH7095 final
  // Function call trace logging (JSR/BSR/BSRF)
  FILE* CallTraceFile = nullptr;
 
+ // Per-instruction trace logging (every single instruction)
+ FILE* InsnTraceFile = nullptr;
+
  enum // must be in range of 0 ... 7
  {
   PEX_POWERON = 0,
