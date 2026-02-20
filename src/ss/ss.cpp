@@ -693,6 +693,7 @@ static int64_t s_insn_trace_start_line = -1;
 static int64_t s_insn_trace_stop_line = -1;
 static bool s_insn_trace_active = false;
 static FILE* s_insn_trace_file = nullptr;
+static bool s_insn_trace_unified = false;  // Write per-insn lines into CallTraceFile
 
 // Called after every line written to the unified trace file.
 void Automation_UnifiedLineWritten(void)
@@ -703,16 +704,32 @@ void Automation_UnifiedLineWritten(void)
  if(s_insn_trace_start_line >= 0 && s_unified_line_count == s_insn_trace_start_line && !s_insn_trace_active)
  {
   s_insn_trace_active = true;
-  CPU[0].InsnTraceFile = s_insn_trace_file;
-  CPU[1].InsnTraceFile = s_insn_trace_file;
-  if(s_insn_trace_file)
-   fprintf(s_insn_trace_file, "# INSN TRACE START after unified line %lld\n", (long long)s_unified_line_count);
+  if(s_insn_trace_unified && CPU[0].CallTraceFile)
+  {
+   // Unified mode: point InsnTraceFile at CallTraceFile so per-instruction
+   // lines are interleaved directly into the unified trace.
+   CPU[0].InsnTraceFile = CPU[0].CallTraceFile;
+   CPU[1].InsnTraceFile = CPU[1].CallTraceFile;
+   fprintf(CPU[0].CallTraceFile, "# INSN TRACE START after unified line %lld\n", (long long)s_unified_line_count);
+  }
+  else
+  {
+   CPU[0].InsnTraceFile = s_insn_trace_file;
+   CPU[1].InsnTraceFile = s_insn_trace_file;
+   if(s_insn_trace_file)
+    fprintf(s_insn_trace_file, "# INSN TRACE START after unified line %lld\n", (long long)s_unified_line_count);
+  }
  }
 
  // Stop trigger
  if(s_insn_trace_active && s_insn_trace_stop_line >= 0 && s_unified_line_count >= s_insn_trace_stop_line)
  {
-  if(s_insn_trace_file)
+  if(s_insn_trace_unified && CPU[0].CallTraceFile)
+  {
+   fprintf(CPU[0].CallTraceFile, "# INSN TRACE STOP at unified line %lld\n", (long long)s_unified_line_count);
+   fflush(CPU[0].CallTraceFile);
+  }
+  else if(s_insn_trace_file)
   {
    fprintf(s_insn_trace_file, "# INSN TRACE STOP at unified line %lld\n", (long long)s_unified_line_count);
    fflush(s_insn_trace_file);
@@ -732,6 +749,7 @@ void Automation_InsnTraceCheckStop(void)
 void Automation_EnableInsnTrace(const char* path, int64_t start_line, int64_t stop_line)
 {
  if(s_insn_trace_file) { fclose(s_insn_trace_file); s_insn_trace_file = nullptr; }
+ s_insn_trace_unified = false;
  s_insn_trace_file = fopen(path, "w");
  s_insn_trace_start_line = start_line;
  s_insn_trace_stop_line = stop_line;
@@ -747,6 +765,20 @@ void Automation_EnableInsnTrace(const char* path, int64_t start_line, int64_t st
   fprintf(s_insn_trace_file, "# Format: timestamp M/S PC opcode\n");
   fflush(s_insn_trace_file);
  }
+}
+
+void Automation_EnableInsnTraceUnified(int64_t start_line, int64_t stop_line)
+{
+ // Like EnableInsnTrace but writes per-instruction lines directly into the
+ // unified trace (CallTraceFile) instead of a separate file.
+ if(s_insn_trace_file) { fclose(s_insn_trace_file); s_insn_trace_file = nullptr; }
+ s_insn_trace_unified = true;
+ s_insn_trace_start_line = start_line;
+ s_insn_trace_stop_line = stop_line;
+ s_insn_trace_active = false;
+ s_unified_line_count = 2;
+ CPU[0].InsnTraceFile = nullptr;
+ CPU[1].InsnTraceFile = nullptr;
 }
 
 void Automation_DisableInsnTrace(void)

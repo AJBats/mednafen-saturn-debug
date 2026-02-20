@@ -86,6 +86,7 @@ namespace MDFN_IEN_SS {
  int64_t Automation_GetMasterCycle(void);
  void Automation_SetDeterministic(void);
  void Automation_EnableInsnTrace(const char* path, int64_t start_line, int64_t stop_line);
+ void Automation_EnableInsnTraceUnified(int64_t start_line, int64_t stop_line);
  void Automation_DisableInsnTrace(void);
 }
 
@@ -585,6 +586,18 @@ static void process_command(const std::string& line)
    MDFN_IEN_SS::Automation_EnableInsnTrace(path.c_str(), start_line, stop_line);
    char buf[256];
    snprintf(buf, sizeof(buf), "ok insn_trace %s start=%lld stop=%lld", path.c_str(), (long long)start_line, (long long)stop_line);
+   write_ack(buf);
+  }
+ }
+ else if (cmd == "insn_trace_unified") {
+  int64_t start_line = 0, stop_line = 0;
+  iss >> start_line >> stop_line;
+  if (start_line <= 0 || stop_line <= 0) {
+   write_ack("error insn_trace_unified: usage: insn_trace_unified <start_line> <stop_line>");
+  } else {
+   MDFN_IEN_SS::Automation_EnableInsnTraceUnified(start_line, stop_line);
+   char buf[256];
+   snprintf(buf, sizeof(buf), "ok insn_trace_unified start=%lld stop=%lld", (long long)start_line, (long long)stop_line);
    write_ack(buf);
   }
  }

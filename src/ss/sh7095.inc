@@ -3457,7 +3457,23 @@ INLINE void SH7095::Step(void)
  }
 
  if(MDFN_UNLIKELY(InsnTraceFile != nullptr))
-  fprintf(InsnTraceFile, "%u %c %08X %04X\n", (unsigned)timestamp, which ? 'S' : 'M', PC - 4, (uint16)Pipe_ID);
+ {
+  if(InsnTraceFile == CallTraceFile)
+  {
+   // Unified mode: interleave per-instruction lines into the call trace.
+   // Use lowercase m/s to distinguish from call events (uppercase M/S).
+   // Extra fields: MA_until, SH7095_mem_timestamp, write_finish_timestamp, BSC.sdram_finish_time, CCR
+   fprintf(CallTraceFile, "%u %c %08X %04X %d %d %d %d %02X\n",
+    (unsigned)timestamp, which ? 's' : 'm', PC - 4, (uint16)Pipe_ID,
+    (int)MA_until, (int)SH7095_mem_timestamp,
+    (int)write_finish_timestamp, (int)BSC.sdram_finish_time, (unsigned)CCR);
+   // Do NOT call Automation_UnifiedLineWritten() here — per-instruction
+   // lines must not increment the unified line counter, which is used
+   // for start/stop triggers keyed to call-level event numbers.
+  }
+  else
+   fprintf(InsnTraceFile, "%u %c %08X %04X\n", (unsigned)timestamp, which ? 'S' : 'M', PC - 4, (uint16)Pipe_ID);
+ }
 
  const uint32 instr = (uint16)Pipe_ID;
  const unsigned instr_nyb1 = (instr >> 4) & 0xF;
