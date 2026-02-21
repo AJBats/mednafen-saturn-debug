@@ -42,6 +42,9 @@ bool Automation_DebugHook(uint32_t pc);
 // T5: Memory watchpoint hit callback — called from ss.cpp when a write hits the watched address.
 void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint32_t new_val, uint32_t pr);
 
+// Log a Mednafen system command (screenshot, save state, etc.) to the input trace file.
+void Automation_LogSystemCommand(const char* cmd_name);
+
 // T4: Window visibility control — consume pending show/hide requests.
 // Returns true (and clears the flag) if a show_window/hide_window command was received.
 // Caller should call SDL_ShowWindow/SDL_HideWindow accordingly.

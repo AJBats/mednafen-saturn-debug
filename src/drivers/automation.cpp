@@ -32,6 +32,8 @@
  *   call_trace_stop            - Stop call trace logging
  *   cdb_trace <path>           - Start logging CD Block events (commands, drive phases, HIRQ, buffers)
  *   cdb_trace_stop             - Stop CD Block trace logging
+ *   input_trace <path>          - Log real keyboard button presses/releases with frame numbers
+ *   input_trace_stop            - Stop input trace logging
  *   watchpoint <addr>          - Break on memory write to addr (hex), reports PC+old+new value
  *   watchpoint_clear           - Remove memory watchpoint
  *   dump_cycle                 - Report current absolute master cycle count
@@ -159,6 +161,10 @@ static int64_t run_to_cycle_target = -1;  // -1 = not active
 static bool watchpoint_active = false;
 static uint32_t watchpoint_addr = 0;
 static bool watchpoint_paused = false;  // true when paused on watchpoint hit
+
+// Input trace state — logs real keyboard input changes with frame numbers
+static FILE* input_trace_file = nullptr;
+static uint16_t last_traced_input = 0;
 
 // Monotonic sequence counter — appended to every ack to guarantee uniqueness.
 // This solves change detection on DrvFS (Windows→WSL) where stat() mtime has
@@ -581,6 +587,30 @@ static void process_command(const std::string& line)
   }
   write_ack("ok unified_trace_stop");
  }
+ else if (cmd == "input_trace") {
+  std::string path;
+  iss >> path;
+  if (path.empty()) {
+   write_ack("error input_trace: no path");
+  } else {
+   if (input_trace_file) fclose(input_trace_file);
+   input_trace_file = fopen(path.c_str(), "w");
+   if (input_trace_file) {
+    fprintf(input_trace_file, "# Input trace — frame PRESS/RELEASE BUTTON\n");
+    last_traced_input = 0;
+    write_ack("ok input_trace " + path);
+   } else {
+    write_ack("error input_trace: cannot open " + path);
+   }
+  }
+ }
+ else if (cmd == "input_trace_stop") {
+  if (input_trace_file) {
+   fclose(input_trace_file);
+   input_trace_file = nullptr;
+  }
+  write_ack("ok input_trace_stop");
+ }
  else if (cmd == "watchpoint") {
   uint32_t addr = 0;
   iss >> std::hex >> addr;
@@ -807,8 +837,43 @@ bool Automation_SuppressRaise(void)
  return automation_active;
 }
 
+void Automation_LogSystemCommand(const char* cmd_name)
+{
+ if (!automation_active || !input_trace_file)
+  return;
+ fprintf(input_trace_file, "frame=%llu SYSCMD %s\n",
+  (unsigned long long)frame_counter, cmd_name);
+ fflush(input_trace_file);
+}
+
 bool Automation_GetInput(unsigned port, uint8_t* data, unsigned data_size)
 {
+ // Input tracing: log real keyboard button changes before any override.
+ // data[] already contains the real keyboard-mapped gamepad state at this point.
+ if (automation_active && input_trace_file && port == 0 && data_size >= 2) {
+  uint16_t cur = data[0] | ((uint16_t)data[1] << 8);
+  if (cur != last_traced_input) {
+   // Log each button that changed
+   static const struct { int bit; const char* name; } btn_names[] = {
+    {BTN_Z, "Z"}, {BTN_Y, "Y"}, {BTN_X, "X"}, {BTN_R, "R"},
+    {BTN_UP, "UP"}, {BTN_DOWN, "DOWN"}, {BTN_LEFT, "LEFT"}, {BTN_RIGHT, "RIGHT"},
+    {BTN_B, "B"}, {BTN_C, "C"}, {BTN_A, "A"}, {BTN_START, "START"}, {BTN_L, "L"},
+   };
+   uint16_t changed = cur ^ last_traced_input;
+   for (int i = 0; i < 13; i++) {
+    if (changed & (1 << btn_names[i].bit)) {
+     bool pressed = (cur & (1 << btn_names[i].bit)) != 0;
+     fprintf(input_trace_file, "frame=%llu %s %s\n",
+      (unsigned long long)frame_counter,
+      pressed ? "PRESS" : "RELEASE",
+      btn_names[i].name);
+    }
+   }
+   fflush(input_trace_file);
+   last_traced_input = cur;
+  }
+ }
+
  if (!automation_active || !input_override || port != 0)
   return false;
 

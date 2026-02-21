@@ -1871,7 +1871,10 @@ static void CheckCommandKeys(void)
   }
 
   if(CK_CheckActive(CK_STATE_REWIND))
+  {
 	DNeedRewind = true;
+	Automation_LogSystemCommand("STATE_REWIND");
+  }
   else
 	DNeedRewind = false;
 
@@ -1928,14 +1931,20 @@ static void CheckCommandKeys(void)
    }
   }
 
-  if(CK_Check(CK_TAKE_SNAPSHOT)) 
+  if(CK_Check(CK_TAKE_SNAPSHOT))
+  {
 	pending_snapshot = 1;
+	Automation_LogSystemCommand("SCREENSHOT");
+  }
 
   if(CK_Check(CK_TAKE_SCALED_SNAPSHOT))
 	pending_ssnapshot = 1;
 
   if(CK_Check(CK_SAVE_STATE))
+  {
 	pending_save_state = 1;
+	Automation_LogSystemCommand("SAVE_STATE");
+  }
 
   if(CK_Check(CK_SAVE_MOVIE))
 	pending_save_movie = 1;
@@ -1944,6 +1953,7 @@ static void CheckCommandKeys(void)
   {
 	MDFNI_LoadState(NULL, NULL);
 	Debugger_GT_SyncDisToPC();
+	Automation_LogSystemCommand("LOAD_STATE");
   }
 
   if(CK_Check(CK_LOAD_MOVIE))
@@ -1985,12 +1995,14 @@ static void CheckCommandKeys(void)
   {
 	MDFNI_Reset();
 	Debugger_GT_ForceStepIfStepping();
+	Automation_LogSystemCommand("RESET");
   }
 
   if(CK_Check(CK_POWER))
   {
 	MDFNI_Power();
 	Debugger_GT_ForceStepIfStepping();
+	Automation_LogSystemCommand("POWER");
   }
 
   if(CurGame->GameType == GMT_ARCADE)
