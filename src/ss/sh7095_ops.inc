@@ -1939,6 +1939,8 @@ switch(Pipe_ID >> 24)
 	}
 	else if(MDFN_UNLIKELY(TPP(PEX_CPUADDR)))
 	{
+	 fprintf(stderr, "[SH2-EXCEPT] %s: CPU Address Error! PC=0x%08x (adjusted PC-4=0x%08x) R0=0x%08x R2=0x%08x R15=0x%08x PR=0x%08x\n",
+	         cpu_name, PC, PC-4, R[0], R[2], R[15], PR);
 	 PC -= 4;
 	 ClearPEX(PEX_CPUADDR);
 	 Exception(EXCEPTION_CPUADDR, VECNUM_CPUADDR, opexec_new_PC);

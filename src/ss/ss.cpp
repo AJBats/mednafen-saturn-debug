@@ -159,6 +159,12 @@ static void (*s_automation_inline_hook)(void) = nullptr;
 static bool automation_wp_active = false;
 static uint32 automation_wp_addr = 0;       // Work RAM High offset (masked to 0xFFFFF)
 
+// Automation: VDP2 VRAM write watchpoint (logs ALL writes in an address range)
+static bool automation_vdp2wp_active = false;
+static uint32 automation_vdp2wp_lo = 0;     // Low address (VDP2 bus addr, e.g. 0x05E7E500)
+static uint32 automation_vdp2wp_hi = 0;     // High address (inclusive)
+static FILE* automation_vdp2wp_log = nullptr;
+
 #include "scu.inc"
 
 #include "debug.inc"
@@ -548,6 +554,15 @@ uint8 Automation_ReadMem8(uint32 addr)
   return (addr & 1) ? (w & 0xFF) : (w >> 8);
  }
 
+ else if (addr >= 0x05E00000 && addr <= 0x05E7FFFF) {
+  // VDP2 VRAM (512KB)
+  return VDP2::PeekVRAM(addr - 0x05E00000);
+ }
+ else if (addr >= 0x05F00000 && addr <= 0x05F00FFF) {
+  // VDP2 CRAM (4KB)
+  return VDP2::PeekCRAM(addr - 0x05F00000);
+ }
+
  return 0xFF; // Unmapped
 }
 
@@ -648,6 +663,12 @@ void Automation_DumpSlaveRegsBin(const char* path)
  }
 }
 
+// Automation: dump VDP2 internal register state to binary file.
+void Automation_DumpVDP2RegsBin(const char* path)
+{
+ VDP2::DumpRawRegsBin(path);
+}
+
 // Automation: passive inline hook callback.
 // Called from RunLoop_INLINE on every master CPU instruction when active.
 // Does NOT go through DebugMode/DBG_CPUHandler/ForceEventUpdates — zero
@@ -682,6 +703,22 @@ void Automation_ClearWatchpoint(void)
 bool Automation_CheckWatchpointActive(void)
 {
  return automation_wp_active;
+}
+
+void Automation_SetVDP2Watchpoint(uint32 lo, uint32 hi, const char* logpath)
+{
+ automation_vdp2wp_lo = lo;
+ automation_vdp2wp_hi = hi;
+ if(automation_vdp2wp_log) { fclose(automation_vdp2wp_log); automation_vdp2wp_log = nullptr; }
+ automation_vdp2wp_log = fopen(logpath, "w");
+ if(automation_vdp2wp_log) fprintf(automation_vdp2wp_log, "# VDP2 VRAM write watchpoint: 0x%08X-0x%08X\n", lo, hi);
+ automation_vdp2wp_active = true;
+}
+
+void Automation_ClearVDP2Watchpoint(void)
+{
+ automation_vdp2wp_active = false;
+ if(automation_vdp2wp_log) { fclose(automation_vdp2wp_log); automation_vdp2wp_log = nullptr; }
 }
 
 void Automation_EnableCallTrace(const char* path)

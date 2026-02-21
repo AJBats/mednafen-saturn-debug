@@ -77,6 +77,8 @@ namespace MDFN_IEN_SS {
  void Automation_SetWatchpoint(uint32 addr);
  void Automation_ClearWatchpoint(void);
  bool Automation_CheckWatchpointActive(void);
+ void Automation_SetVDP2Watchpoint(uint32 lo, uint32 hi, const char* logpath);
+ void Automation_ClearVDP2Watchpoint(void);
  void CDB_EnableSCDQTrace(const char* path);
  void CDB_DisableSCDQTrace(void);
  void CDB_EnableCDBTrace(const char* path);
@@ -87,6 +89,7 @@ namespace MDFN_IEN_SS {
  void Automation_ClearCallTraceFile(void);
  int64_t Automation_GetMasterCycle(void);
  void Automation_SetDeterministic(void);
+ void Automation_DumpVDP2RegsBin(const char* path);
  void Automation_EnableInsnTrace(const char* path, int64_t start_line, int64_t stop_line);
  void Automation_EnableInsnTraceUnified(int64_t start_line, int64_t stop_line);
  void Automation_DisableInsnTrace(void);
@@ -418,6 +421,16 @@ static void process_command(const std::string& line)
    }
   }
  }
+ else if (cmd == "dump_vdp2_regs") {
+  std::string path;
+  iss >> path;
+  if (path.empty()) {
+   write_ack("error dump_vdp2_regs: no path");
+  } else {
+   MDFN_IEN_SS::Automation_DumpVDP2RegsBin(path.c_str());
+   write_ack("ok dump_vdp2_regs " + path);
+  }
+ }
  else if (cmd == "pc_trace_frame") {
   std::string path;
   iss >> path;
@@ -586,6 +599,23 @@ static void process_command(const std::string& line)
   MDFN_IEN_SS::Automation_ClearWatchpoint();
   update_cpu_hook();
   write_ack("ok watchpoint_clear");
+ }
+ else if (cmd == "vdp2_watchpoint") {
+  uint32_t lo = 0, hi = 0;
+  std::string logpath;
+  iss >> std::hex >> lo >> hi >> logpath;
+  if (logpath.empty()) {
+   write_ack("error vdp2_watchpoint: usage: vdp2_watchpoint <lo_hex> <hi_hex> <logpath>");
+  } else {
+   MDFN_IEN_SS::Automation_SetVDP2Watchpoint(lo, hi, logpath.c_str());
+   char buf[128];
+   snprintf(buf, sizeof(buf), "ok vdp2_watchpoint 0x%08X-0x%08X %s", lo, hi, logpath.c_str());
+   write_ack(buf);
+  }
+ }
+ else if (cmd == "vdp2_watchpoint_clear") {
+  MDFN_IEN_SS::Automation_ClearVDP2Watchpoint();
+  write_ack("ok vdp2_watchpoint_clear");
  }
  else if (cmd == "deterministic") {
   MDFN_IEN_SS::Automation_SetDeterministic();

@@ -2614,6 +2614,7 @@ INLINE void SH7095::Cache_CheckReadIncoherency(CacheEntry* cent, const int way, 
   if(MDFN_UNLIKELY(A & (sizeof(T) - 1)))									\
   {														\
    SS_DBG(SS_DBG_WARNING | SS_DBG_SH2, "[%s] Misaligned %zu-byte read from 0x%08x\n", cpu_name, sizeof(T), A);	\
+   fprintf(stderr, "[SH2-ADDRERR] %s: Misaligned %zu-byte READ from 0x%08x, PC=0x%08x\n", cpu_name, sizeof(T), A, PC);	\
    A &= ~(sizeof(T) - 1);											\
    SetPEX(PEX_CPUADDR);												\
   }														\
@@ -2744,6 +2745,7 @@ INLINE void SH7095::Cache_CheckReadIncoherency(CacheEntry* cent, const int way, 
  if(MDFN_UNLIKELY(A & (sizeof(T) - 1)))						\
  {										\
   SS_DBG(SS_DBG_WARNING | SS_DBG_SH2, "[%s] Misaligned %zu-byte write of 0x%08x to 0x%08x\n", cpu_name, sizeof(T), V, A);	\
+  fprintf(stderr, "[SH2-ADDRERR] %s: Misaligned %zu-byte WRITE of 0x%08x to 0x%08x, PC=0x%08x\n", cpu_name, sizeof(T), V, A, PC);	\
   A &= ~(sizeof(T) - 1);							\
   SetPEX(PEX_CPUADDR);								\
  }										\
@@ -3263,6 +3265,7 @@ static const uint8 InstrDecodeTab[65536] =
  if(MDFN_UNLIKELY(PC & 1))						\
  {									\
   /* Pending for the instruction after the delay slot instruction. */	\
+  fprintf(stderr, "[SH2-ADDRERR] %s: Odd PC after DelayBranch: PC=0x%08x\n", cpu_name, PC);	\
   SetPEX(PEX_CPUADDR);							\
  }									\
  else									\
@@ -3290,6 +3293,7 @@ static const uint8 InstrDecodeTab[65536] =
 									\
  if(MDFN_UNLIKELY(PC & 1))						\
  {									\
+  fprintf(stderr, "[SH2-ADDRERR] %s: Odd PC after Branch: PC=0x%08x\n", cpu_name, PC);	\
   SetPEX(PEX_CPUADDR);							\
   DoID(false);								\
  }									\
@@ -3326,6 +3330,7 @@ static const uint8 InstrDecodeTab[65536] =
  if(MDFN_UNLIKELY(PC & 1))						\
  {									\
   /* Pending for the instruction after the delay slot instruction. */	\
+  fprintf(stderr, "[SH2-ADDRERR] %s: Odd PC after UCDelayBranch: PC=0x%08x\n", cpu_name, PC);	\
   SetPEX(PEX_CPUADDR);							\
  }									\
  else									\
@@ -3369,6 +3374,9 @@ static const uint8 InstrDecodeTab[65536] =
  timestamp += 2;							\
  timestamp = std::max<sscpu_timestamp_t>(MA_until, timestamp);		\
 									\
+ if((unsigned)(exnum) != 9) /* skip regular interrupts (EXCEPTION_INT=9) */ \
+  fprintf(stderr, "[SH2-EXCEPTION] %s: exnum=%u vecnum=0x%02x PC=0x%08x SR=0x%08x R15=0x%08x PR=0x%08x VBR=0x%08x\n", \
+         cpu_name, (unsigned)(exnum), (unsigned)(vecnum), PC, SR, R[15], PR, VBR); \
  /* Save SR to stack */							\
  /* Save PC to stack */							\
  /* Read exception vector table */					\
@@ -3382,6 +3390,9 @@ static const uint8 InstrDecodeTab[65536] =
  MemRead32(VBR + ((vecnum) << 2), new_PC);				\
  timestamp++;								\
 									\
+ if((unsigned)(exnum) != 9) /* skip regular interrupts */ \
+  fprintf(stderr, "[SH2-EXCEPTION] %s: -> handler at 0x%08x (saved PC=0x%08x on stack at R15=0x%08x)\n", \
+         cpu_name, (unsigned)(new_PC), PC, R[15]); \
  if(DebugMode)								\
   DBG_AddBranchTrace(this - CPU, new_PC, (exnum), (vecnum));		\
 									\

@@ -931,6 +931,14 @@ static INLINE void BBusRW_DB(uint32 A, uint16* DB, int32* time_thing, int32* dma
 
   if(IsWrite)
   {
+   // Automation: VDP2 VRAM write watchpoint
+   if(MDFN_UNLIKELY(automation_vdp2wp_active) && A >= automation_vdp2wp_lo && A <= automation_vdp2wp_hi)
+   {
+    if(automation_vdp2wp_log)
+     fprintf(automation_vdp2wp_log, "vdp2w addr=0x%08X val=0x%04X pc0=0x%08X pc1=0x%08X pr0=0x%08X pr1=0x%08X\n",
+             A, (unsigned)*DB, CPU[0].PC, CPU[1].PC, CPU[0].PR, CPU[1].PR);
+   }
+
    uint32 expenalty;
 
    if(sizeof(T) == 1)

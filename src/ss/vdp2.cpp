@@ -1392,6 +1392,13 @@ uint8 PeekVRAM(uint32 addr)
  return ne16_rbo_be<uint8>(VRAM, addr & 0x7FFFF);
 }
 
+uint8 PeekCRAM(uint32 addr)
+{
+ addr &= 0xFFF;
+ uint16 val = CRAM[addr >> 1];
+ return (addr & 1) ? (val & 0xFF) : (val >> 8);
+}
+
 void PokeVRAM(uint32 addr, const uint8 val)
 {
  addr &= 0x7FFFF;
@@ -1530,6 +1537,21 @@ void StateAction(StateMem* sm, const unsigned load, const bool data_only)
  }
 
  VDP2REND_StateAction(sm, load, data_only, RawRegs, CRAM, VRAM);
+}
+
+void DumpRawRegsBin(const char* path)
+{
+ FILE* f = fopen(path, "wb");
+ if(f) {
+  // Write 256 uint16 values as big-endian (Saturn native byte order)
+  for(unsigned i = 0; i < 0x100; i++) {
+   uint8 hi = (RawRegs[i] >> 8) & 0xFF;
+   uint8 lo = RawRegs[i] & 0xFF;
+   fwrite(&hi, 1, 1, f);
+   fwrite(&lo, 1, 1, f);
+  }
+  fclose(f);
+ }
 }
 
 void MakeDump(const std::string& path)
