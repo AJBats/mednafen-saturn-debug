@@ -1499,7 +1499,6 @@ switch(Pipe_ID >> 24)
 	PR = PC;
 	if(MDFN_UNLIKELY(CallTraceFile != nullptr))
 	{
-	 Automation_InsnTraceCheckStop();
 	 fprintf(CallTraceFile, "%u %c %08X %08X\n", (unsigned)timestamp, which ? 'S' : 'M', PC - 4, (uint32)(PC + ((uint32)sign_x_to_s32(12, instr) << 1)));
 	 Automation_UnifiedLineWritten();
 	}
@@ -1515,7 +1514,6 @@ switch(Pipe_ID >> 24)
 	PR = PC;
 	if(MDFN_UNLIKELY(CallTraceFile != nullptr))
 	{
-	 Automation_InsnTraceCheckStop();
 	 fprintf(CallTraceFile, "%u %c %08X %08X\n", (unsigned)timestamp, which ? 'S' : 'M', PC - 4, (uint32)(PC + R[instr_nyb2]));
 	 Automation_UnifiedLineWritten();
 	}
@@ -1539,7 +1537,6 @@ switch(Pipe_ID >> 24)
 	PR = PC;
 	if(MDFN_UNLIKELY(CallTraceFile != nullptr))
 	{
-	 Automation_InsnTraceCheckStop();
 	 fprintf(CallTraceFile, "%u %c %08X %08X\n", (unsigned)timestamp, which ? 'S' : 'M', PC - 4, R[instr_nyb2]);
 	 Automation_UnifiedLineWritten();
 	}

@@ -54,9 +54,9 @@ using namespace Mednafen;
 #include "cart.h"
 #include "db.h"
 
-// Forward declarations — defined in drivers/automation.cpp (global namespace)
+// Forward declarations -- defined in drivers/automation.cpp (global namespace)
 bool Automation_DebugHook(uint32_t pc);
-void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint32_t new_val, uint32_t pr);
+void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint32_t new_val, uint32_t pr, const char* source);
 
 namespace MDFN_IEN_SS
 {
@@ -425,7 +425,7 @@ static INLINE void BusRW_DB_CS3(const uint32 A, uint32& DB, const bool BurstHax,
  {
   uint32 wp_new = ne16_rbo_be<uint32>(WorkRAMH, automation_wp_addr & 0xFFFFC);
   if(wp_new != wp_old)
-   ::Automation_WatchpointHit(CPU[0].PC, A, wp_old, wp_new, CPU[0].PR);
+   ::Automation_WatchpointHit(CPU[0].PC, A, wp_old, wp_new, CPU[0].PR, "CPU");
  }
 }
 
@@ -554,6 +554,18 @@ uint8 Automation_ReadMem8(uint32 addr)
   return (addr & 1) ? (w & 0xFF) : (w >> 8);
  }
 
+ else if (addr >= 0x05C00000 && addr <= 0x05C7FFFF) {
+  // VDP1 VRAM (512KB)
+  return VDP1::PeekVRAM(addr - 0x05C00000);
+ }
+ else if (addr >= 0x05C80000 && addr <= 0x05CFFFFF) {
+  // VDP1 framebuffer (256KB, reads display buffer 0)
+  return VDP1::PeekFB(0, addr - 0x05C80000);
+ }
+ else if (addr >= 0x05A00000 && addr <= 0x05A7FFFF) {
+  // SCSP sound RAM (512KB)
+  return SOUND_PeekRAM(addr);
+ }
  else if (addr >= 0x05E00000 && addr <= 0x05E7FFFF) {
   // VDP2 VRAM (512KB)
   return VDP2::PeekVRAM(addr - 0x05E00000);
@@ -563,7 +575,7 @@ uint8 Automation_ReadMem8(uint32 addr)
   return VDP2::PeekCRAM(addr - 0x05F00000);
  }
 
- return 0xFF; // Unmapped
+ return 0xFF; // Unmapped region
 }
 
 // Automation: get current master CPU PC (the real register, not the debug pipeline PC).
@@ -670,8 +682,9 @@ void Automation_DumpVDP2RegsBin(const char* path)
 }
 
 // Automation: passive inline hook callback.
-// Called from RunLoop_INLINE on every master CPU instruction when active.
-// Does NOT go through DebugMode/DBG_CPUHandler/ForceEventUpdates — zero
+// Called from RunLoop_INLINE BEFORE CPU[0].Step() on every master CPU instruction.
+// At this point, CPU[0].PC is the address of the instruction about to execute.
+// Does NOT go through DebugMode/DBG_CPUHandler/ForceEventUpdates -- zero
 // timing side effects. Observation is completely invisible to the emulated Saturn.
 static void Automation_InlineHookCallback(void)
 {
@@ -817,12 +830,6 @@ void Automation_UnifiedLineWritten(void)
   CPU[0].InsnTraceFile = nullptr;
   CPU[1].InsnTraceFile = nullptr;
  }
-}
-
-// Called from BSR/JSR/BSRF handlers — just delegates to UnifiedLineWritten check.
-void Automation_InsnTraceCheckStop(void)
-{
- // No-op now; stop logic moved to UnifiedLineWritten
 }
 
 void Automation_EnableInsnTrace(const char* path, int64_t start_line, int64_t stop_line)

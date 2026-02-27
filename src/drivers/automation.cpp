@@ -13,35 +13,48 @@
  *   input_clear                - Release all buttons
  *   run_to_frame <N>           - Run until frame N then pause
  *   quit                       - Clean shutdown
- *   dump_regs                  - Dump SH-2 master CPU registers
- *   dump_mem <addr> <size>     - Dump memory (hex), addr in hex
- *   status                     - Report current frame, pause state, etc.
- *   run                        - Free-run (unpause)
- *   pause                      - Pause emulation (blocking)
+ *   dump_regs                  - Dump SH-2 master CPU registers (text: 23 values incl MACL)
  *   dump_regs_bin <path>       - Write 22 uint32s (R0-R15,PC,SR,PR,GBR,VBR,MACH) to binary file
- *   dump_mem_bin <addr> <sz> <path> - Write raw memory bytes to binary file
+ *   dump_slave_regs            - Dump SH-2 slave CPU registers (text)
+ *   dump_slave_regs_bin <path> - Write 22 uint32s for slave SH-2
+ *   dump_mem <addr> <size>     - Dump memory (hex), addr in hex, max 4KB text (use dump_mem_bin for larger)
+ *   dump_mem_bin <addr> <sz> <path> - Write raw memory bytes to binary file (max 1MB)
+ *   dump_vdp2_regs <path>      - Write VDP2 register state to binary file
+ *   dump_cycle                 - Report current absolute master cycle count
+ *   run_to_cycle <N>           - Run until master cycle count reaches N
  *   pc_trace_frame <path>      - Trace all master CPU PCs for 1 frame to binary file
  *   show_window                - Make the emulator window visible (for visual inspection)
  *   hide_window                - Hide the emulator window again
  *   step [N]                   - Step N CPU instructions then pause (default 1)
- *   breakpoint <addr>          - Add PC breakpoint (hex address)
+ *   breakpoint <addr>          - Add PC breakpoint (hex address, deduplicates)
+ *   breakpoint_remove <addr>   - Remove specific PC breakpoint
  *   breakpoint_clear           - Remove all breakpoints
  *   breakpoint_list            - List active breakpoints
  *   continue                   - Resume execution (until next breakpoint or frame end)
  *   call_trace <path>          - Start logging JSR/BSR/BSRF calls to text file
  *   call_trace_stop            - Stop call trace logging
- *   cdb_trace <path>           - Start logging CD Block events (commands, drive phases, HIRQ, buffers)
- *   cdb_trace_stop             - Stop CD Block trace logging
- *   input_trace <path>          - Log real keyboard button presses/releases with frame numbers
- *   input_trace_stop            - Stop input trace logging
+ *   unified_trace <path>       - Combined call trace + CD Block events
+ *   unified_trace_stop         - Stop unified trace
+ *   insn_trace <path> <start> <stop> - Per-instruction trace to file
+ *   insn_trace_unified <start> <stop> - Per-instruction trace into unified trace
+ *   insn_trace_stop            - Stop instruction trace
+ *   scdq_trace <path>          - Start logging SCDQ events
+ *   scdq_trace_stop            - Stop SCDQ trace
+ *   cdb_trace <path>           - Start logging CD Block events
+ *   cdb_trace_stop             - Stop CD Block trace
+ *   input_trace <path>         - Log real keyboard button presses/releases with frame numbers
+ *   input_trace_stop           - Stop input trace logging
  *   watchpoint <addr>          - Break on memory write to addr (hex), reports PC+old+new value
  *   watchpoint_clear           - Remove memory watchpoint
- *   dump_cycle                 - Report current absolute master cycle count
- *   run_to_cycle <N>           - Run until master cycle count reaches N then pause
+ *   vdp2_watchpoint <lo> <hi> <path> - Watch VDP2 address range
+ *   vdp2_watchpoint_clear      - Remove VDP2 watchpoint
+ *   deterministic              - Enable deterministic mode (fixed RTC seed)
+ *   status                     - Report current frame, pause state, etc.
+ *   run                        - Free-run (unpause)
+ *   pause                      - Pause emulation (blocking)
  *
- * All ack responses include cycle=N (absolute master SH-2 cycle count, int64).
- * This is the universal timescale for deterministic debugging — all Saturn
- * components (CD block, slave SH-2, VDP, sound) derive their timing from it.
+ * All ack responses include cycle=N seq=M appended by write_ack().
+ * cycle= is absolute master SH-2 cycle count (int64); seq= is monotonic for change detection.
  *
  * Part of mednafen-saturn-debug fork.
  */
@@ -53,6 +66,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
+#include <unordered_set>
 #include <fstream>
 #include <sstream>
 #include <sys/stat.h>
@@ -63,39 +77,7 @@
 
 #include <mednafen/mednafen.h>
 #include "../video/png.h"
-
-// Saturn-specific accessors — implemented in ss.cpp to avoid header dependencies
-namespace MDFN_IEN_SS {
- uint8 Automation_ReadMem8(uint32 addr);
- std::string Automation_DumpRegs(void);
- void Automation_DumpRegsBin(const char* path);
- std::string Automation_DumpSlaveRegs(void);
- void Automation_DumpSlaveRegsBin(const char* path);
- void Automation_EnableCPUHook(void);
- void Automation_DisableCPUHook(void);
- uint32 Automation_GetMasterPC(void);
- void Automation_EnableCallTrace(const char* path);
- void Automation_DisableCallTrace(void);
- void Automation_SetWatchpoint(uint32 addr);
- void Automation_ClearWatchpoint(void);
- bool Automation_CheckWatchpointActive(void);
- void Automation_SetVDP2Watchpoint(uint32 lo, uint32 hi, const char* logpath);
- void Automation_ClearVDP2Watchpoint(void);
- void CDB_EnableSCDQTrace(const char* path);
- void CDB_DisableSCDQTrace(void);
- void CDB_EnableCDBTrace(const char* path);
- void CDB_DisableCDBTrace(void);
- void CDB_SetCDBTraceFile(FILE* f);
- void CDB_ClearCDBTraceFile(void);
- void Automation_SetCallTraceFile(FILE* f);
- void Automation_ClearCallTraceFile(void);
- int64_t Automation_GetMasterCycle(void);
- void Automation_SetDeterministic(void);
- void Automation_DumpVDP2RegsBin(const char* path);
- void Automation_EnableInsnTrace(const char* path, int64_t start_line, int64_t stop_line);
- void Automation_EnableInsnTraceUnified(int64_t start_line, int64_t stop_line);
- void Automation_DisableInsnTrace(void);
-}
+#include "../ss/automation_ss.h"
 
 static FILE* unified_trace_file = nullptr;
 static bool automation_active = false;
@@ -129,6 +111,8 @@ enum SaturnButton {
  BTN_L      = 15,
 };
 
+// Automation input is ADDITIVE (ORed into keyboard state).
+// It does not suppress real keyboard input -- both sources contribute.
 static uint16_t input_buttons = 0;  // bitmask of pressed buttons
 static bool input_override = false;
 
@@ -148,8 +132,8 @@ static bool pc_trace_frame_mode = false;
 static int64_t instructions_to_step = -1;  // -1=not stepping, 0=step done, >0=counting
 static bool instruction_paused = false;     // true when spin-waiting inside debug hook
 
-// Breakpoint list
-static std::vector<uint32_t> breakpoints;
+// Breakpoint set (O(1) lookup, deduplicates automatically)
+static std::unordered_set<uint32_t> breakpoints;
 
 // Track whether the CPU debug hook is currently enabled
 static bool cpu_hook_active = false;
@@ -161,18 +145,19 @@ static int64_t run_to_cycle_target = -1;  // -1 = not active
 static bool watchpoint_active = false;
 static uint32_t watchpoint_addr = 0;
 static bool watchpoint_paused = false;  // true when paused on watchpoint hit
+static FILE* wp_log = nullptr;          // watchpoint hit log file
 
-// Input trace state — logs real keyboard input changes with frame numbers
+// Input trace state -- logs real keyboard input changes with frame numbers
 static FILE* input_trace_file = nullptr;
 static uint16_t last_traced_input = 0;
 
-// Monotonic sequence counter — appended to every ack to guarantee uniqueness.
-// This solves change detection on DrvFS (Windows→WSL) where stat() mtime has
+// Monotonic sequence counter -- appended to every ack to guarantee uniqueness.
+// This solves change detection on DrvFS (Windows->WSL) where stat() mtime has
 // only 1-second resolution and file size padding isn't always sufficient.
 static uint64_t ack_seq = 0;
 
 // Content-based change detection for action file.
-// DrvFS (Windows→WSL filesystem) has unreliable stat() mtime caching that can
+// DrvFS (Windows->WSL filesystem) has unreliable stat() mtime caching that can
 // miss rapid file updates from the Windows side. Instead of stat(), we read
 // the first line (comment with sequence number) and compare to last-seen content.
 static std::string last_action_header;
@@ -198,7 +183,7 @@ static void write_ack(const std::string& msg)
 // Called after any change to pc_trace, stepping, or breakpoint state.
 static void update_cpu_hook(void)
 {
- // Watchpoints don't need the CPU hook — they're detected inline in BusRW_DB_CS3
+ // Watchpoints don't need the CPU hook -- they're detected inline in BusRW_DB_CS3
  bool need = pc_trace_active || (instructions_to_step >= 0) || !breakpoints.empty()
           || (run_to_cycle_target >= 0);
  if (need && !cpu_hook_active) {
@@ -244,8 +229,13 @@ static void dump_registers(void)
 
 static void dump_memory(uint32_t addr, uint32_t size)
 {
- // Clamp size to avoid huge dumps
- if (size > 0x10000) size = 0x10000;
+ // Clamp text dumps to 4KB -- use dump_mem_bin for larger reads
+ if (size > 0x1000) {
+  char msg[128];
+  snprintf(msg, sizeof(msg), "error dump_mem: size 0x%X exceeds 4KB text limit, use dump_mem_bin", size);
+  write_ack(msg);
+  return;
+ }
 
  std::ostringstream ss;
  char buf[16];
@@ -275,6 +265,14 @@ static void do_screenshot(const MDFN_Surface* surface, const MDFN_Rect* rect, co
  }
 
  pending_screenshot_path.clear();
+}
+
+static void close_wp_log(void)
+{
+ if (wp_log) {
+  fclose(wp_log);
+  wp_log = nullptr;
+ }
 }
 
 static void process_command(const std::string& line)
@@ -368,7 +366,7 @@ static void process_command(const std::string& line)
   dump_registers();
  }
  else if (cmd == "dump_mem") {
-  uint32_t addr = 0, size = 256;
+  uint32_t addr = 0, size = 256;  // default 256 bytes if size omitted
   iss >> std::hex >> addr >> size;
   dump_memory(addr, size);
  }
@@ -450,6 +448,9 @@ static void process_command(const std::string& line)
     pc_trace_active = true;
     pc_trace_frame_mode = true;
     frames_to_advance = 1;
+    instruction_paused = false;   // unblock instruction-level pause
+    instructions_to_step = -1;    // cancel step mode
+    run_to_cycle_target = -1;     // cancel cycle target
     update_cpu_hook();
     write_ack("ok pc_trace_frame_started");
    }
@@ -461,7 +462,7 @@ static void process_command(const std::string& line)
   if (n < 1) n = 1;
   instructions_to_step = n;
   instruction_paused = false;  // unblock instruction-level pause if active
-  // Unblock frame-level pause — the CPU hook will pause us after N instructions
+  // Unblock frame-level pause -- the CPU hook will pause us after N instructions
   if (frames_to_advance == 0)
    frames_to_advance = -1;
   update_cpu_hook();
@@ -470,11 +471,24 @@ static void process_command(const std::string& line)
  else if (cmd == "breakpoint") {
   uint32_t addr = 0;
   iss >> std::hex >> addr;
-  breakpoints.push_back(addr);
+  breakpoints.insert(addr);
   update_cpu_hook();
   char buf[32];
   snprintf(buf, sizeof(buf), "0x%08X", addr);
   write_ack(std::string("ok breakpoint ") + buf + " total=" + std::to_string(breakpoints.size()));
+ }
+ else if (cmd == "breakpoint_remove") {
+  uint32_t addr = 0;
+  iss >> std::hex >> addr;
+  size_t removed = breakpoints.erase(addr);
+  update_cpu_hook();
+  char buf[64];
+  if (removed) {
+   snprintf(buf, sizeof(buf), "ok breakpoint_remove 0x%08X total=%zu", addr, breakpoints.size());
+  } else {
+   snprintf(buf, sizeof(buf), "error breakpoint_remove: not found 0x%08X", addr);
+  }
+  write_ack(buf);
  }
  else if (cmd == "breakpoint_clear") {
   size_t count = breakpoints.size();
@@ -485,9 +499,9 @@ static void process_command(const std::string& line)
  else if (cmd == "breakpoint_list") {
   std::ostringstream ss;
   ss << "breakpoints count=" << breakpoints.size();
-  for (size_t i = 0; i < breakpoints.size(); i++) {
+  for (auto addr : breakpoints) {
    char buf[16];
-   snprintf(buf, sizeof(buf), " 0x%08X", breakpoints[i]);
+   snprintf(buf, sizeof(buf), " 0x%08X", addr);
    ss << buf;
   }
   write_ack(ss.str());
@@ -496,7 +510,7 @@ static void process_command(const std::string& line)
   instruction_paused = false;  // unblock instruction-level pause
   instructions_to_step = -1;   // no step counting
   run_to_cycle_target = -1;    // cancel cycle target
-  // Unblock frame-level pause — will run until breakpoint or next pause command
+  // Unblock frame-level pause -- will run until breakpoint or next pause command
   if (frames_to_advance == 0)
    frames_to_advance = -1;
   update_cpu_hook();
@@ -596,7 +610,7 @@ static void process_command(const std::string& line)
    if (input_trace_file) fclose(input_trace_file);
    input_trace_file = fopen(path.c_str(), "w");
    if (input_trace_file) {
-    fprintf(input_trace_file, "# Input trace — frame PRESS/RELEASE BUTTON\n");
+    fprintf(input_trace_file, "# Input trace -- frame PRESS/RELEASE BUTTON\n");
     last_traced_input = 0;
     write_ack("ok input_trace " + path);
    } else {
@@ -617,6 +631,8 @@ static void process_command(const std::string& line)
   watchpoint_addr = addr;
   watchpoint_active = true;
   watchpoint_paused = false;
+  // Close stale log from previous watchpoint
+  close_wp_log();
   MDFN_IEN_SS::Automation_SetWatchpoint(addr);
   update_cpu_hook();
   char buf[64];
@@ -626,6 +642,7 @@ static void process_command(const std::string& line)
  else if (cmd == "watchpoint_clear") {
   watchpoint_active = false;
   watchpoint_paused = false;
+  close_wp_log();
   MDFN_IEN_SS::Automation_ClearWatchpoint();
   update_cpu_hook();
   write_ack("ok watchpoint_clear");
@@ -688,6 +705,13 @@ static void process_command(const std::string& line)
  else if (cmd == "run_to_cycle") {
   int64_t n = 0;
   iss >> n;
+  int64_t current = get_cycle();
+  if (n <= current) {
+   char buf[128];
+   snprintf(buf, sizeof(buf), "warning run_to_cycle: target %lld <= current %lld, firing immediately", (long long)n, (long long)current);
+   write_ack(buf);
+   return;
+  }
   run_to_cycle_target = n;
   instruction_paused = false;
   instructions_to_step = -1;
@@ -750,7 +774,7 @@ void Automation_Init(const std::string& dir)
  ack_file = dir + "/mednafen_ack.txt";
  automation_active = true;
  frame_counter = 0;
- frames_to_advance = 0;  // Start PAUSED — external tool must send "run" or "frame_advance"
+ frames_to_advance = 0;  // Start PAUSED -- external tool must send "run" or "frame_advance"
  last_action_header.clear();
 
  // Write initial ack so external tools know we're ready
@@ -761,7 +785,7 @@ void Automation_Init(const std::string& dir)
  fprintf(stderr, "  Ack file:    %s\n", ack_file.c_str());
 }
 
-void Automation_Poll(void* surface, void* rect, void* lw)
+void Automation_Poll(const MDFN_Surface* surface, const MDFN_Rect* rect, const int32* lw)
 {
  if (!automation_active)
   return;
@@ -770,11 +794,7 @@ void Automation_Poll(void* surface, void* rect, void* lw)
 
  // Handle pending screenshot with actual framebuffer
  if (!pending_screenshot_path.empty() && surface && rect) {
-  do_screenshot(
-   static_cast<const MDFN_Surface*>(surface),
-   static_cast<const MDFN_Rect*>(rect),
-   static_cast<const int32*>(lw)
-  );
+  do_screenshot(surface, rect, lw);
  }
 
  // Check run_to_frame
@@ -805,7 +825,7 @@ void Automation_Poll(void* surface, void* rect, void* lw)
  // Poll for new commands (every frame)
  check_action_file();
 
- // Block emulation when paused — spin-wait until a command unpauses us.
+ // Block emulation when paused -- spin-wait until a command unpauses us.
  // This prevents the emulator from running ahead while the orchestrator
  // reads acks and sends new commands.
  while (frames_to_advance == 0 && automation_active) {
@@ -824,6 +844,7 @@ void Automation_Kill(void)
  if (automation_active) {
   write_ack("shutdown frame=" + std::to_string(frame_counter));
   automation_active = false;
+  close_wp_log();
  }
 }
 
@@ -878,7 +899,8 @@ bool Automation_GetInput(unsigned port, uint8_t* data, unsigned data_size)
   return false;
 
  // OR automation button presses into the existing data.
- // The Saturn digital pad uses 2 bytes, bits set = pressed in Mednafen's format.
+ // NOTE: This is additive -- real keyboard input is NOT suppressed.
+ // Both automation and keyboard presses contribute to the final state.
  if (data_size >= 2) {
   data[0] |= (uint8_t)(input_buttons & 0xFF);
   data[1] |= (uint8_t)((input_buttons >> 8) & 0xFF);
@@ -905,51 +927,45 @@ bool Automation_ConsumePendingHideWindow(void)
  return false;
 }
 
-// Called from ss.cpp (BusRW_DB_CS3) when a memory write hits the watched address.
+// Called from ss.cpp (BusRW_DB_CS3 / DMA_Write) when a memory write hits the watched address.
 // pc = current CPU PC, addr = full address written, old_val/new_val = 32-bit values.
 // pr = return address register (caller context).
-// This runs inline in the CPU execution path — must NOT block.
-void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint32_t new_val, uint32_t pr)
+// source = "CPU" or "DMA" -- indicates write origin.
+// This runs inline in the CPU execution path -- must NOT block.
+void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint32_t new_val, uint32_t pr, const char* source)
 {
  if (!watchpoint_active || !automation_active)
   return;
 
  // Log hit to watchpoint log file (append mode)
- static FILE* wp_log = nullptr;
  if (!wp_log) {
   std::string path = auto_base_dir + "/watchpoint_hits.txt";
   wp_log = fopen(path.c_str(), "w");
   if (wp_log) fprintf(wp_log, "# Watchpoint hits for addr 0x%08X\n", watchpoint_addr);
  }
  if (wp_log) {
-  fprintf(wp_log, "pc=0x%08X pr=0x%08X addr=0x%08X old=0x%08X new=0x%08X frame=%llu\n",
-   pc, pr, addr, old_val, new_val, (unsigned long long)frame_counter);
+  fprintf(wp_log, "pc=0x%08X pr=0x%08X addr=0x%08X old=0x%08X new=0x%08X source=%s frame=%llu\n",
+   pc, pr, addr, old_val, new_val, source, (unsigned long long)frame_counter);
   fflush(wp_log);
  }
 
  // Also write to ack so the test script can detect hits
  char msg[256];
  snprintf(msg, sizeof(msg),
-  "hit watchpoint pc=0x%08X pr=0x%08X old=0x%08X new=0x%08X frame=%llu",
-  pc, pr, old_val, new_val, (unsigned long long)frame_counter);
+  "hit watchpoint pc=0x%08X pr=0x%08X old=0x%08X new=0x%08X source=%s frame=%llu",
+  pc, pr, old_val, new_val, source, (unsigned long long)frame_counter);
  write_ack(msg);
 }
 
 bool Automation_DebugHook(uint32_t pc)
 {
- // PC trace — record every instruction's PC to file
+ // PC trace -- record every instruction's PC to file
  if (pc_trace_active && pc_trace_file) {
   fwrite(&pc, 4, 1, pc_trace_file);
  }
 
- // Check breakpoints
- bool bp_hit = false;
- for (size_t i = 0; i < breakpoints.size(); i++) {
-  if (pc == breakpoints[i]) {
-   bp_hit = true;
-   break;
-  }
- }
+ // Check breakpoints (O(1) lookup via unordered_set)
+ bool bp_hit = breakpoints.count(pc) > 0;
 
  // Check cycle target
  bool cycle_hit = false;
@@ -971,12 +987,12 @@ bool Automation_DebugHook(uint32_t pc)
  instruction_paused = true;
  instructions_to_step = -1;
 
- // The `pc` parameter from the debug hook is the instruction decode address (PC_ID).
- // CPU[0].PC is the pipeline fetch address (typically 4 bytes ahead on SH-2).
- // For breakpoint hits, `pc` is guaranteed correct (it matched the breakpoint).
- // For step completion, use CPU[0].PC as the authoritative value.
+ // NOTE on PC values:
+ // This hook fires BEFORE CPU[0].Step() in RunLoop_INLINE (ss.cpp).
+ // At this point, CPU[0].PC is the address of the instruction about to execute,
+ // which is the correct value for breakpoint matching and step reporting.
+ // For step completion, we use Automation_GetMasterPC() which returns CPU[0].PC.
  uint32_t real_pc = MDFN_IEN_SS::Automation_GetMasterPC();
- // ack_seq is auto-incremented by write_ack() now
 
  char msg[256];
  if (bp_hit)

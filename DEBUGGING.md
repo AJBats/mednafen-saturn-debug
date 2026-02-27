@@ -114,6 +114,9 @@ def wait_ack_change(timeout=30):
 | `input_release <button>` | Release button |
 | `input_clear` | Release all buttons |
 
+**Input is additive**: automation input is ORed into keyboard state. Both automation and
+real keyboard presses contribute - automation does not suppress keyboard input.
+
 Button bits (Mednafen IDII layout):
 - data[0]: Z(0) Y(1) X(2) R(3) UP(4) DOWN(5) LEFT(6) RIGHT(7)
 - data[1]: B(0) C(1) A(2) START(3) pad(4-6) L(7)
@@ -126,7 +129,7 @@ Button bits (Mednafen IDII layout):
 | `dump_regs_bin <path>` | Write 22 uint32s to binary file | R0-R15, PC, SR, PR, GBR, VBR, MACH (no MACL). Little-endian. Read with `struct.unpack('<22I', data)` |
 | `dump_slave_regs` | Dump slave SH-2 registers (text) | Same format as `dump_regs` but for slave CPU |
 | `dump_slave_regs_bin <path>` | Write 22 uint32s for slave SH-2 | Same format as `dump_regs_bin` |
-| `dump_mem <addr> <size>` | Hex dump memory (text, max 64KB) | Address in hex. Cache-aware reads. |
+| `dump_mem <addr> [size]` | Hex dump memory (text, max 4KB) | Address in hex. Default 256 bytes. Use `dump_mem_bin` for larger reads. |
 | `dump_mem_bin <addr> <size> <path>` | Write raw bytes to file (max 1MB) | Address and size in hex. |
 | `dump_vdp2_regs <path>` | Write VDP2 register state to binary file | |
 | `screenshot <path>` | Save framebuffer as PNG | Queued, taken next frame |
@@ -135,12 +138,16 @@ Button bits (Mednafen IDII layout):
 (tag match across 4 ways), falls back to backing RAM. This is critical - code loaded from
 disc may only exist in cache, not in backing RAM.
 
+**Readable memory regions**: BIOS ROM, Work RAM Low/High, VDP1 VRAM, VDP1 framebuffer,
+VDP2 VRAM, VDP2 CRAM, SCSP sound RAM. Unmapped addresses return 0xFF.
+
 ### Debug: Instruction-Level
 
 | Command | Description | Ack |
 |---------|-------------|-----|
 | `step [N]` | Execute N CPU instructions, then pause | `ok step N` then `done step pc=0xXXXXXXXX frame=N` |
-| `breakpoint <addr>` | Add PC breakpoint (hex) | `ok breakpoint 0xXXXXXXXX total=N` |
+| `breakpoint <addr>` | Add PC breakpoint (hex, deduplicates) | `ok breakpoint 0xXXXXXXXX total=N` |
+| `breakpoint_remove <addr>` | Remove specific breakpoint | `ok breakpoint_remove 0xXXXXXXXX total=N` |
 | `breakpoint_clear` | Remove all breakpoints | `ok breakpoint_clear removed=N` |
 | `breakpoint_list` | List active breakpoints | `breakpoints count=N 0xAAAAAAAA 0xBBBBBBBB` |
 | `continue` | Resume until next breakpoint | `ok continue` then `break pc=0xXXXXXXXX ...` on hit |
@@ -195,9 +202,12 @@ lines use lowercase `m/s` with additional fields: `<timestamp> m/s <PC-4> <opcod
 
 Watchpoint hits are **non-blocking** - logged to `watchpoint_hits.txt` and ack file.
 
-File log format: `pc=0xXXXXXXXX pr=0xXXXXXXXX addr=0xXXXXXXXX old=0xXXXXXXXX new=0xXXXXXXXX frame=N`
+File log format: `pc=0xXXXXXXXX pr=0xXXXXXXXX addr=0xXXXXXXXX old=0xXXXXXXXX new=0xXXXXXXXX source=CPU/DMA frame=N`
 
-Ack format (note - no `addr=` field): `hit watchpoint pc=0xXXXXXXXX pr=0xXXXXXXXX old=0xXXXXXXXX new=0xXXXXXXXX frame=N`
+Ack format: `hit watchpoint pc=0xXXXXXXXX pr=0xXXXXXXXX old=0xXXXXXXXX new=0xXXXXXXXX source=CPU/DMA frame=N`
+
+**Note on `source=DMA`**: For DMA writes, `pc=` and `pr=` reflect whatever the master CPU
+happened to be executing when the DMA completed, not the code that initiated the transfer.
 
 ### Window Control
 
