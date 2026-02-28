@@ -965,7 +965,17 @@ bool Automation_DebugHook(uint32_t pc)
  }
 
  // Check breakpoints (O(1) lookup via unordered_set)
+ // Also check pc-2: after JSR/BSR/JMP/RTS, the SH-2 pipeline fetch stage
+ // advances PC past the first instruction at the branch target.
+ // UCDelayBranch does FetchIF_ForceIBufferFill() which sets PC = target+2.
+ // So when this hook fires, PC is already target+2 and a breakpoint set at
+ // the exact branch target ('target') would miss without this fallback.
  bool bp_hit = breakpoints.count(pc) > 0;
+ uint32_t bp_addr = pc;
+ if (!bp_hit && breakpoints.count(pc - 2) > 0) {
+  bp_hit = true;
+  bp_addr = pc - 2;
+ }
 
  // Check cycle target
  bool cycle_hit = false;
@@ -997,7 +1007,7 @@ bool Automation_DebugHook(uint32_t pc)
  char msg[256];
  if (bp_hit)
   snprintf(msg, sizeof(msg), "break pc=0x%08X addr=0x%08X frame=%llu",
-   pc, pc, (unsigned long long)frame_counter);
+   pc, bp_addr, (unsigned long long)frame_counter);
  else if (cycle_hit)
   snprintf(msg, sizeof(msg), "done run_to_cycle pc=0x%08X frame=%llu",
    real_pc, (unsigned long long)frame_counter);
