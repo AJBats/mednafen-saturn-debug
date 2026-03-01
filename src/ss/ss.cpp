@@ -578,6 +578,48 @@ uint8 Automation_ReadMem8(uint32 addr)
  return 0xFF; // Unmapped region
 }
 
+// Automation: bulk memory read — copies backing store directly for speed.
+// Bypasses SH-2 cache (reads physical memory, not CPU's cached view).
+// For regions stored as big-endian uint16 arrays, converts to byte order.
+void Automation_ReadMemBlock(uint32 addr, uint8* buf, uint32 size)
+{
+ addr &= 0x0FFFFFFF;
+
+ for (uint32 i = 0; i < size; i++) {
+  uint32 a = addr + i;
+
+  if (a >= 0x06000000 && a <= 0x060FFFFF) {
+   uint32 off = a & 0xFFFFF;
+   uint16 w = WorkRAMH[off >> 1];
+   buf[i] = (off & 1) ? (w & 0xFF) : (w >> 8);
+  }
+  else if (a >= 0x00200000 && a <= 0x002FFFFF) {
+   uint32 off = a & 0xFFFFF;
+   uint16 w = WorkRAML[off >> 1];
+   buf[i] = (off & 1) ? (w & 0xFF) : (w >> 8);
+  }
+  else if (a >= 0x05C00000 && a <= 0x05C7FFFF) {
+   buf[i] = VDP1::PeekVRAM(a - 0x05C00000);
+  }
+  else if (a >= 0x05E00000 && a <= 0x05E7FFFF) {
+   buf[i] = VDP2::PeekVRAM(a - 0x05E00000);
+  }
+  else if (a >= 0x05F00000 && a <= 0x05F00FFF) {
+   buf[i] = VDP2::PeekCRAM(a - 0x05F00000);
+  }
+  else if (a >= 0x05A00000 && a <= 0x05A7FFFF) {
+   buf[i] = SOUND_PeekRAM(a);
+  }
+  else if (a < 0x00080000) {
+   uint16 w = BIOSROM[a >> 1];
+   buf[i] = (a & 1) ? (w & 0xFF) : (w >> 8);
+  }
+  else {
+   buf[i] = 0xFF;
+  }
+ }
+}
+
 // Automation: get current master CPU PC (the real register, not the debug pipeline PC).
 uint32 Automation_GetMasterPC(void)
 {

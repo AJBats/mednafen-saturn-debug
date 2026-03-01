@@ -17,6 +17,10 @@ namespace MDFN_IEN_SS {
  // Memory reads (cache-aware for instruction cache)
  uint8 Automation_ReadMem8(uint32 addr);
 
+ // Bulk memory read — copies 'size' bytes from Saturn address space into 'buf'.
+ // Uses backing store directly (bypasses cache) for speed on large reads.
+ void Automation_ReadMemBlock(uint32 addr, uint8* buf, uint32 size);
+
  // Register dumps
  std::string Automation_DumpRegs(void);
  void Automation_DumpRegsBin(const char* path);

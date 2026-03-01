@@ -19,6 +19,7 @@
  *   dump_slave_regs_bin <path> - Write 22 uint32s for slave SH-2
  *   dump_mem <addr> <size>     - Dump memory (hex), addr in hex, max 4KB text (use dump_mem_bin for larger)
  *   dump_mem_bin <addr> <sz> <path> - Write raw memory bytes to binary file (max 1MB)
+ *   dump_region <name> <path>  - Dump named region: wram_high wram_low vdp1_vram vdp2_vram vdp2_cram sound_ram
  *   dump_vdp2_regs <path>      - Write VDP2 register state to binary file
  *   dump_cycle                 - Report current absolute master cycle count
  *   run_to_cycle <N>           - Run until master cycle count reaches N
@@ -426,6 +427,43 @@ static void process_command(const std::string& line)
     write_ack(ack_msg);
    } else {
     write_ack("error dump_mem_bin: cannot open " + path);
+   }
+  }
+ }
+ else if (cmd == "dump_region") {
+  // Convenience command: dump named memory region to binary file.
+  // Usage: dump_region <name> <path>
+  // Regions: wram_high (1MB), wram_low (1MB), vdp1_vram (512KB),
+  //          vdp2_vram (512KB), vdp2_cram (4KB), sound_ram (512KB)
+  std::string name, path;
+  iss >> name >> path;
+  if (name.empty() || path.empty()) {
+   write_ack("error dump_region: usage: dump_region <name> <path>");
+  } else {
+   uint32_t addr = 0, size = 0;
+   if (name == "wram_high")      { addr = 0x06000000; size = 0x100000; }
+   else if (name == "wram_low")  { addr = 0x00200000; size = 0x100000; }
+   else if (name == "vdp1_vram") { addr = 0x05C00000; size = 0x080000; }
+   else if (name == "vdp2_vram") { addr = 0x05E00000; size = 0x080000; }
+   else if (name == "vdp2_cram") { addr = 0x05F00000; size = 0x001000; }
+   else if (name == "sound_ram") { addr = 0x05A00000; size = 0x080000; }
+   else {
+    write_ack("error dump_region: unknown region '" + name +
+     "' (valid: wram_high wram_low vdp1_vram vdp2_vram vdp2_cram sound_ram)");
+    return;
+   }
+   std::vector<uint8_t> buf(size);
+   MDFN_IEN_SS::Automation_ReadMemBlock(addr, buf.data(), size);
+   FILE* f = fopen(path.c_str(), "wb");
+   if (f) {
+    fwrite(buf.data(), 1, size, f);
+    fclose(f);
+    char ack_msg[128];
+    snprintf(ack_msg, sizeof(ack_msg), "ok dump_region %s 0x%08X 0x%X %s",
+     name.c_str(), addr, size, path.c_str());
+    write_ack(ack_msg);
+   } else {
+    write_ack("error dump_region: cannot open " + path);
    }
   }
  }
