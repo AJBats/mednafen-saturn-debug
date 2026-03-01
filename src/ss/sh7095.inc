@@ -2626,6 +2626,13 @@ INLINE void SH7095::Cache_CheckReadIncoherency(CacheEntry* cent, const int way, 
   timestamp = std::max<sscpu_timestamp_t>(MA_until, timestamp);							\
 														\
  DevBuild_ReadLog<T>(A); 											\
+ /* CDL: mark as DATA_READ */											\
+ if(IsInstr <= 0 && MDFN_UNLIKELY(cdl_active))									\
+ {														\
+  uint32 cra = A & 0x0FFFFFFF;											\
+  if(cra >= 0x06000000 && cra + sizeof(T) <= 0x06100000)							\
+   for(uint32 ci = 0; ci < sizeof(T); ci++) cdl_bitmap[cra - 0x06000000 + ci] |= 0x02;				\
+ }														\
 														\
  switch(region)													\
  {														\
@@ -2753,6 +2760,22 @@ INLINE void SH7095::Cache_CheckReadIncoherency(CacheEntry* cent, const int way, 
  MA_until = std::max<sscpu_timestamp_t>(MA_until, timestamp + 1);		\
 										\
  DevBuild_WriteLog<T>(A, V);							\
+ /* CDL: mark as DATA_WRITE */							\
+ if(MDFN_UNLIKELY(cdl_active))							\
+ {										\
+  uint32 cwa = A & 0x0FFFFFFF;							\
+  if(cwa >= 0x06000000 && cwa + sizeof(T) <= 0x06100000)			\
+   for(uint32 cwi = 0; cwi < sizeof(T); cwi++)				\
+    cdl_bitmap[cwa - 0x06000000 + cwi] |= 0x04;				\
+ }										\
+ /* Memory write profiling */							\
+ if(MDFN_UNLIKELY(memprofile_file != nullptr))					\
+ {										\
+  uint32 mpa = A & 0x0FFFFFFF;							\
+  if(mpa >= memprofile_lo && mpa <= memprofile_hi)				\
+   fprintf(memprofile_file, "pc=0x%08X addr=0x%08X val=0x%X sz=%zu\n",	\
+    PC, A, (uint32)V, sizeof(T));						\
+ }										\
 										\
  switch(region)									\
  {										\
@@ -3185,6 +3208,17 @@ static const uint8 InstrDecodeTab[65536] =
 									\
   if(MDFN_UNLIKELY((int32)PC < 0))      /* Mr. Boooones */		\
    Pipe_IF = Cache_ReadDataArray<uint16>(PC);				\
+ }									\
+ /* CDL: mark 2 bytes as CODE */					\
+ if(MDFN_UNLIKELY(cdl_active))						\
+ {									\
+  uint32 ca = PC & 0x0FFFFFFF;						\
+  if(ca >= 0x06000000 && ca <= 0x060FFFFE)				\
+  {									\
+   uint32 off = ca - 0x06000000;					\
+   cdl_bitmap[off]   |= 0x01;						\
+   cdl_bitmap[off+1] |= 0x01;						\
+  }									\
  }									\
  timestamp++;								\
 }

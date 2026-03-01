@@ -165,6 +165,26 @@ static uint32 automation_vdp2wp_lo = 0;     // Low address (VDP2 bus addr, e.g. 
 static uint32 automation_vdp2wp_hi = 0;     // High address (inclusive)
 static FILE* automation_vdp2wp_log = nullptr;
 
+// Automation: Code/Data Logging (CDL)
+// Per-byte bitfield for High WRAM (0x06000000-0x060FFFFF, 1MB).
+// Bit 0 (0x01): CODE — fetched as instruction
+// Bit 1 (0x02): DATA_READ — read as data
+// Bit 2 (0x04): DATA_WRITE — written as data
+static bool cdl_active = false;
+static uint8 cdl_bitmap[0x100000];  // 1MB — one byte per High WRAM byte
+
+// Automation: DMA trace logging
+static FILE* dma_trace_file = nullptr;
+
+// Automation: Memory write profiling
+// Logs {pc, target_addr, value, size} for writes in a configurable address range.
+static FILE* memprofile_file = nullptr;
+static uint32 memprofile_lo = 0;   // Start address (masked to 0x0FFFFFFF)
+static uint32 memprofile_hi = 0;   // End address (inclusive, masked)
+
+// Forward declaration — used in scu.inc, defined below
+void Automation_LogDMA(int level, uint32 src, uint32 dst, uint32 bytes);
+
 #include "scu.inc"
 
 #include "debug.inc"
@@ -774,6 +794,84 @@ void Automation_ClearVDP2Watchpoint(void)
 {
  automation_vdp2wp_active = false;
  if(automation_vdp2wp_log) { fclose(automation_vdp2wp_log); automation_vdp2wp_log = nullptr; }
+}
+
+// CDL (Code/Data Logging)
+void Automation_CDLStart(void)
+{
+ memset(cdl_bitmap, 0, sizeof(cdl_bitmap));
+ cdl_active = true;
+}
+
+void Automation_CDLStop(void)
+{
+ cdl_active = false;
+}
+
+void Automation_CDLReset(void)
+{
+ memset(cdl_bitmap, 0, sizeof(cdl_bitmap));
+}
+
+bool Automation_CDLDump(const char* path)
+{
+ FILE* f = fopen(path, "wb");
+ if(!f) return false;
+ fwrite(cdl_bitmap, 1, sizeof(cdl_bitmap), f);
+ fclose(f);
+ return true;
+}
+
+bool Automation_CDLIsActive(void)
+{
+ return cdl_active;
+}
+
+// DMA trace logging
+void Automation_EnableDMATrace(const char* path)
+{
+ if(dma_trace_file) fclose(dma_trace_file);
+ dma_trace_file = fopen(path, "w");
+ if(dma_trace_file)
+  fprintf(dma_trace_file, "# DMA trace: level src dst bytes pc frame\n");
+}
+
+void Automation_DisableDMATrace(void)
+{
+ if(dma_trace_file) {
+  fclose(dma_trace_file);
+  dma_trace_file = nullptr;
+ }
+}
+
+void Automation_LogDMA(int level, uint32 src, uint32 dst, uint32 bytes)
+{
+ if(!dma_trace_file) return;
+ uint32 pc = CPU[0].PC;
+ fprintf(dma_trace_file, "L%d src=0x%08X dst=0x%08X len=0x%X pc=0x%08X cycle=%lld\n",
+  level, src, dst, bytes, pc,
+  (long long)(automation_total_cycles + CPU[0].timestamp));
+ fflush(dma_trace_file);
+}
+
+// Memory write profiling
+void Automation_EnableMemProfile(const char* path, uint32 lo, uint32 hi)
+{
+ if(memprofile_file) fclose(memprofile_file);
+ memprofile_lo = lo & 0x0FFFFFFF;
+ memprofile_hi = hi & 0x0FFFFFFF;
+ memprofile_file = fopen(path, "w");
+ if(memprofile_file)
+  fprintf(memprofile_file, "# Mem write profile: 0x%08X-0x%08X\n# pc addr value size cycle\n",
+   lo, hi);
+}
+
+void Automation_DisableMemProfile(void)
+{
+ if(memprofile_file) {
+  fclose(memprofile_file);
+  memprofile_file = nullptr;
+ }
 }
 
 void Automation_EnableCallTrace(const char* path)

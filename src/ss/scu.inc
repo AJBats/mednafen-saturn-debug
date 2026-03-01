@@ -1351,6 +1351,10 @@ static bool StartDMATransfer(DMALevelS* d, const uint32 ra, const uint32 wa, con
 
  SS_DBGTI(SS_DBG_SCU, "[SCU] Starting DMA level %d transfer; ra=0x%08x wa=0x%08x bc=0x%08x - read_inc=%d write_inc=0x%01x - indirect=%d %d", (int)(d - DMALevel), ra, wa, bc, d->ReadAdd, d->WriteAdd, d->Indirect, d->SF);
 
+ // Automation: DMA trace logging
+ if(MDFN_UNLIKELY(dma_trace_file != nullptr))
+  Automation_LogDMA((int)(d - DMALevel), ra, wa, bc);
+
  if(MDFN_UNLIKELY(rb == -1))
  {
   SS_DBG(SS_DBG_WARNING | SS_DBG_SCU, "[SCU] Attempted DMA from illegal address 0x%08x\n", ra);

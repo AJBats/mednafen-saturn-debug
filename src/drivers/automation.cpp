@@ -49,6 +49,15 @@
  *   watchpoint_clear           - Remove memory watchpoint
  *   vdp2_watchpoint <lo> <hi> <path> - Watch VDP2 address range
  *   vdp2_watchpoint_clear      - Remove VDP2 watchpoint
+ *   cdl_start                   - Start Code/Data Logging (clears bitmap, marks code/data per byte)
+ *   cdl_stop                    - Stop CDL (preserves bitmap)
+ *   cdl_reset                   - Clear CDL bitmap without stopping
+ *   cdl_dump <path>             - Dump 1MB CDL bitmap to binary file
+ *   cdl_status                  - Report CDL active state
+ *   dma_trace <path>            - Start logging SCU DMA transfers to text file
+ *   dma_trace_stop              - Stop DMA trace logging
+ *   mem_profile <lo> <hi> <path> - Log writes to address range [lo,hi] to text file
+ *   mem_profile_stop            - Stop memory write profiling
  *   save_state <path>           - Save full emulator state to file
  *   load_state <path>           - Load emulator state from file
  *   deterministic              - Enable deterministic mode (fixed RTC seed)
@@ -793,6 +802,65 @@ static void process_command(const std::string& line)
   char buf[128];
   snprintf(buf, sizeof(buf), "ok run_to_cycle target=%lld", (long long)n);
   write_ack(buf);
+ }
+ else if (cmd == "cdl_start") {
+  MDFN_IEN_SS::Automation_CDLStart();
+  write_ack("ok cdl_start");
+ }
+ else if (cmd == "cdl_stop") {
+  MDFN_IEN_SS::Automation_CDLStop();
+  write_ack("ok cdl_stop");
+ }
+ else if (cmd == "cdl_reset") {
+  MDFN_IEN_SS::Automation_CDLReset();
+  write_ack("ok cdl_reset");
+ }
+ else if (cmd == "cdl_dump") {
+  std::string path;
+  iss >> path;
+  if (path.empty()) {
+   write_ack("error cdl_dump: no path");
+  } else {
+   if (MDFN_IEN_SS::Automation_CDLDump(path.c_str()))
+    write_ack("ok cdl_dump " + path);
+   else
+    write_ack("error cdl_dump: cannot open " + path);
+  }
+ }
+ else if (cmd == "cdl_status") {
+  write_ack(std::string("ok cdl_status active=") +
+   (MDFN_IEN_SS::Automation_CDLIsActive() ? "true" : "false"));
+ }
+ else if (cmd == "dma_trace") {
+  std::string path;
+  iss >> path;
+  if (path.empty()) {
+   write_ack("error dma_trace: no path");
+  } else {
+   MDFN_IEN_SS::Automation_EnableDMATrace(path.c_str());
+   write_ack("ok dma_trace " + path);
+  }
+ }
+ else if (cmd == "dma_trace_stop") {
+  MDFN_IEN_SS::Automation_DisableDMATrace();
+  write_ack("ok dma_trace_stop");
+ }
+ else if (cmd == "mem_profile") {
+  uint32_t lo = 0, hi = 0;
+  std::string path;
+  iss >> std::hex >> lo >> hi >> path;
+  if (path.empty()) {
+   write_ack("error mem_profile: usage: mem_profile <lo_hex> <hi_hex> <path>");
+  } else {
+   MDFN_IEN_SS::Automation_EnableMemProfile(path.c_str(), lo, hi);
+   char buf[128];
+   snprintf(buf, sizeof(buf), "ok mem_profile 0x%08X-0x%08X %s", lo, hi, path.c_str());
+   write_ack(buf);
+  }
+ }
+ else if (cmd == "mem_profile_stop") {
+  MDFN_IEN_SS::Automation_DisableMemProfile();
+  write_ack("ok mem_profile_stop");
  }
  else {
   write_ack("error unknown command: " + cmd);
