@@ -209,6 +209,60 @@ Ack format: `hit watchpoint pc=0xXXXXXXXX pr=0xXXXXXXXX old=0xXXXXXXXX new=0xXXX
 **Note on `source=DMA`**: For DMA writes, `pc=` and `pr=` reflect whatever the master CPU
 happened to be executing when the DMA completed, not the code that initiated the transfer.
 
+### Debug: Code/Data Logging (CDL)
+
+| Command | Description | Notes |
+|---------|-------------|-------|
+| `cdl_start` | Start CDL (clears bitmap first) | Per-byte bitfield for High WRAM (1MB) |
+| `cdl_stop` | Stop CDL (preserves bitmap) | |
+| `cdl_reset` | Clear bitmap without stopping | |
+| `cdl_dump <path>` | Dump 1MB CDL bitmap to file | |
+| `cdl_status` | Report active state | |
+
+**CDL bits** (per byte of High WRAM 0x06000000-0x060FFFFF):
+- `0x01` = CODE — instruction fetch (2 bytes per SH-2 instruction)
+- `0x02` = DATA_READ — read as data (not instruction fetch)
+- `0x04` = DATA_WRITE — written as data
+
+**Hooks**: FetchIF() marks CODE, MemRead() marks DATA_READ (with `IsInstr<=0` guard),
+MemWrite() marks DATA_WRITE. All guarded by `MDFN_UNLIKELY(cdl_active)` for zero
+overhead when inactive.
+
+Use with `tools/cdl_report.py` to get per-function coverage percentages.
+
+### Debug: DMA Trace
+
+| Command | Description | Notes |
+|---------|-------------|-------|
+| `dma_trace <path>` | Log all SCU DMA transfers to text file | |
+| `dma_trace_stop` | Stop DMA trace | |
+
+**Hook**: `StartDMATransfer()` in scu.inc. Logs level (0/1/2), source, dest, byte count,
+and current master PC at time of transfer.
+
+**Output format**: `level=N src=0xXXXXXXXX dst=0xXXXXXXXX bytes=N pc=0xXXXXXXXX`
+
+### Debug: Memory Write Profiling
+
+| Command | Description | Notes |
+|---------|-------------|-------|
+| `mem_profile <lo> <hi> <path>` | Log all CPU writes in address range to file | lo/hi in hex |
+| `mem_profile_stop` | Stop profiling | |
+
+**Hook**: MemWrite() macro in sh7095.inc. Only fires for addresses in [lo, hi].
+Guarded by `MDFN_UNLIKELY(memprofile_file != nullptr)`.
+
+**Output format**: `pc=0xXXXXXXXX addr=0xXXXXXXXX val=0xXX sz=N`
+
+### Debug: Named Region Dumps
+
+| Command | Description |
+|---------|-------------|
+| `dump_region <name> <path>` | Dump entire named memory region to binary file |
+
+**Regions**: `wram_high` (1MB), `wram_low` (1MB), `vdp1_vram` (512KB),
+`vdp2_vram` (512KB), `vdp2_cram` (4KB), `sound_ram` (512KB).
+
 ### Window Control
 
 | Command | Description |
