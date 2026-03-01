@@ -48,6 +48,8 @@
  *   watchpoint_clear           - Remove memory watchpoint
  *   vdp2_watchpoint <lo> <hi> <path> - Watch VDP2 address range
  *   vdp2_watchpoint_clear      - Remove VDP2 watchpoint
+ *   save_state <path>           - Save full emulator state to file
+ *   load_state <path>           - Load emulator state from file
  *   deterministic              - Enable deterministic mode (fixed RTC seed)
  *   status                     - Report current frame, pause state, etc.
  *   run                        - Free-run (unpause)
@@ -76,6 +78,8 @@
 #endif
 
 #include <mednafen/mednafen.h>
+#include <mednafen/state.h>
+#include <mednafen/FileStream.h>
 #include "../video/png.h"
 #include "../ss/automation_ss.h"
 
@@ -433,6 +437,36 @@ static void process_command(const std::string& line)
   } else {
    MDFN_IEN_SS::Automation_DumpVDP2RegsBin(path.c_str());
    write_ack("ok dump_vdp2_regs " + path);
+  }
+ }
+ else if (cmd == "save_state") {
+  std::string path;
+  iss >> path;
+  if (path.empty()) {
+   write_ack("error save_state: no path");
+  } else {
+   try {
+    FileStream fs(path, FileStream::MODE_WRITE);
+    MDFNSS_SaveSM(&fs);
+    write_ack("ok save_state " + path);
+   } catch (std::exception& e) {
+    write_ack(std::string("error save_state: ") + e.what());
+   }
+  }
+ }
+ else if (cmd == "load_state") {
+  std::string path;
+  iss >> path;
+  if (path.empty()) {
+   write_ack("error load_state: no path");
+  } else {
+   try {
+    FileStream fs(path, FileStream::MODE_READ);
+    MDFNSS_LoadSM(&fs);
+    write_ack("ok load_state " + path);
+   } catch (std::exception& e) {
+    write_ack(std::string("error load_state: ") + e.what());
+   }
   }
  }
  else if (cmd == "pc_trace_frame") {
