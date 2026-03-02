@@ -33,6 +33,8 @@ namespace MDFN_IEN_SS {
  void Automation_DisableCPUHook(void);
  uint32 Automation_GetMasterPC(void);
  int64_t Automation_GetMasterCycle(void);
+ uint32 Automation_GetMasterSR(void);
+ void Automation_SetMasterSR(uint32 val);
 
  // Call tracing
  void Automation_EnableCallTrace(const char* path);

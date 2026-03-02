@@ -965,6 +965,20 @@ void Automation_Poll(const MDFN_Surface* surface, const MDFN_Rect* rect, const i
  // Poll for new commands (every frame)
  check_action_file();
 
+ // Unstick CPU if caught inside VBlank handler with interrupts masked.
+ // The SH-2's VBlank interrupt is delivered at IRL level 15. If the frame
+ // boundary catches the CPU inside the VBlank handler (which runs with
+ // SR.I=15 from interrupt acceptance), subsequent frame_advance calls
+ // will be stuck because 15 > 15 is false and VBlank can never fire.
+ // Fix: lower SR.I to 0 at frame-level pause so the next frame_advance
+ // can process VBlank normally. SetMasterSR calls RecalcPendingIntPEX().
+ if (frames_to_advance == 0) {
+  uint32_t sr = MDFN_IEN_SS::Automation_GetMasterSR();
+  if (((sr >> 4) & 0xF) >= 0xF) {
+   MDFN_IEN_SS::Automation_SetMasterSR(sr & ~0xF0);
+  }
+ }
+
  // Block emulation when paused -- spin-wait until a command unpauses us.
  // This prevents the emulator from running ahead while the orchestrator
  // reads acks and sends new commands.

@@ -646,6 +646,17 @@ uint32 Automation_GetMasterPC(void)
  return CPU[0].PC;
 }
 
+// Automation: get/set master CPU SR (for interrupt mask level checks).
+uint32 Automation_GetMasterSR(void)
+{
+ return CPU[0].GetRegister(SH7095::GSREG_SR, nullptr, 0);
+}
+
+void Automation_SetMasterSR(uint32 val)
+{
+ CPU[0].SetRegister(SH7095::GSREG_SR, val);
+}
+
 // Automation: get absolute master cycle count (survives frame-boundary adjustments).
 int64_t Automation_GetMasterCycle(void)
 {
