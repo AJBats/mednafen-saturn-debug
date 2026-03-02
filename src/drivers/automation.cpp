@@ -80,6 +80,9 @@
 #include <vector>
 #include <unordered_set>
 #include <fstream>
+#include "../MemoryStream.h"
+#include "../compress/GZFileStream.h"
+#include "../endian.h"
 #include <sstream>
 #include <sys/stat.h>
 #include <time.h>
@@ -493,8 +496,12 @@ static void process_command(const std::string& line)
    write_ack("error save_state: no path");
   } else {
    try {
-    FileStream fs(path, FileStream::MODE_WRITE);
-    MDFNSS_SaveSM(&fs);
+    // Match MDFNI_SaveState: SaveSM to memory, then gzip to file
+    MemoryStream ms(65536);
+    MDFNSS_SaveSM(&ms);
+    GZFileStream gp(path, GZFileStream::MODE::WRITE, 6);
+    gp.write(ms.map(), ms.size());
+    gp.close();
     write_ack("ok save_state " + path);
    } catch (std::exception& e) {
     write_ack(std::string("error save_state: ") + e.what());
@@ -508,8 +515,17 @@ static void process_command(const std::string& line)
    write_ack("error load_state: no path");
   } else {
    try {
-    FileStream fs(path, FileStream::MODE_READ);
-    MDFNSS_LoadSM(&fs);
+    // Match MDFNI_LoadState: gzip decompress, parse header, LoadSM
+    GZFileStream st(path, GZFileStream::MODE::READ);
+    uint8 header[32];
+    st.read(header, 32);
+    uint32 st_len = MDFN_de32lsb(header + 16 + 4) & 0x7FFFFFFF;
+    if (st_len < 32)
+     throw std::runtime_error("Save state header length field is bad");
+    MemoryStream sm(st_len, -1);
+    memcpy(sm.map(), header, 32);
+    st.read(sm.map() + 32, st_len - 32);
+    MDFNSS_LoadSM(&sm, false);
     write_ack("ok load_state " + path);
    } catch (std::exception& e) {
     write_ack(std::string("error load_state: ") + e.what());
