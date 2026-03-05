@@ -27,3 +27,4 @@
 /src/sexyal/Makefile
 /src/ss/Makefile
 /build-win64/
+__pycache__/
