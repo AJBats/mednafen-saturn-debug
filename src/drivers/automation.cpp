@@ -133,7 +133,7 @@ enum SaturnButton {
 static uint16_t input_buttons = 0;  // bitmask of pressed buttons
 static bool input_override = false;
 
-// Pending screenshot
+// Pending screenshot — captured during next Automation_Poll, ack suppresses frame_advance ack
 static std::string pending_screenshot_path;
 
 // Pending window visibility changes
@@ -318,8 +318,15 @@ static void process_command(const std::string& line)
   if (path.empty()) {
    write_ack("error screenshot: no path specified");
   } else {
+   // Queue screenshot + auto-advance 1 frame to capture with fresh framebuffer.
+   // do_screenshot runs at start of next Automation_Poll with the rendered surface.
+   // The frame_advance ack is suppressed — only "ok screenshot" is written.
    pending_screenshot_path = path;
-   write_ack("ok screenshot_queued " + path);
+   frames_to_advance = 1;
+   instruction_paused = false;
+   instructions_to_step = -1;
+   run_to_cycle_target = -1;
+   update_cpu_hook();
   }
  }
  else if (cmd == "input") {
@@ -948,9 +955,11 @@ void Automation_Poll(const MDFN_Surface* surface, const MDFN_Rect* rect, const i
 
  frame_counter++;
 
- // Handle pending screenshot with actual framebuffer
+ // Handle pending screenshot with fresh framebuffer
+ bool screenshot_taken = false;
  if (!pending_screenshot_path.empty() && surface && rect) {
   do_screenshot(surface, rect, lw);
+  screenshot_taken = true;
  }
 
  // Check run_to_frame
@@ -972,7 +981,9 @@ void Automation_Poll(const MDFN_Surface* surface, const MDFN_Rect* rect, const i
     pc_trace_frame_mode = false;
     update_cpu_hook();
     write_ack("done pc_trace_frame frame=" + std::to_string(frame_counter));
-   } else {
+   } else if (!screenshot_taken) {
+    // Suppress frame_advance ack if this frame was auto-advanced for screenshot
+    // (the screenshot ack is the authoritative response)
     write_ack("done frame_advance frame=" + std::to_string(frame_counter));
    }
   }
