@@ -7,7 +7,7 @@
  *
  * Commands:
  *   frame_advance [N]          - Run N frames then pause (default 1)
- *   screenshot <path>          - Save framebuffer to PNG at given path
+ *   screenshot <path>          - Save cached framebuffer to PNG (no frame advance, no PC movement)
  *   input <button>             - Press button (START, A, B, C, X, Y, Z, UP, DOWN, LEFT, RIGHT, L, R)
  *   input_release <button>     - Release button
  *   input_clear                - Release all buttons
@@ -133,8 +133,15 @@ enum SaturnButton {
 static uint16_t input_buttons = 0;  // bitmask of pressed buttons
 static bool input_override = false;
 
-// Pending screenshot — captured during next Automation_Poll, ack suppresses frame_advance ack
-static std::string pending_screenshot_path;
+// Cached framebuffer for instant screenshots (no frame advance needed).
+// Updated every frame in Automation_Poll with a full copy of the pixel data.
+// Saturn max: 704x576x4 = ~1.5MB — trivial.
+static uint32_t* cached_fb_pixels = nullptr;
+static int32* cached_fb_lw = nullptr;
+static MDFN_Rect cached_fb_rect;
+static MDFN_PixelFormat cached_fb_format;
+static int32 cached_fb_w = 0, cached_fb_h = 0, cached_fb_pitch = 0;
+static bool cached_fb_valid = false;
 
 // Pending window visibility changes
 static bool pending_show_window = false;
@@ -269,19 +276,22 @@ static void dump_memory(uint32_t addr, uint32_t size)
  write_ack(ss.str());
 }
 
-static void do_screenshot(const MDFN_Surface* surface, const MDFN_Rect* rect, const int32* lw)
+static void do_screenshot(const std::string& path)
 {
- if (pending_screenshot_path.empty() || !surface || !rect)
+ if (!cached_fb_valid || !cached_fb_pixels) {
+  write_ack("error screenshot: no cached framebuffer (need at least 1 frame)");
   return;
+ }
 
+ // Create a temporary surface pointing to our cached pixel buffer.
+ // pixels_is_external=true (p_pixels != NULL) so destructor won't free it.
+ MDFN_Surface tmp(cached_fb_pixels, cached_fb_w, cached_fb_h, cached_fb_pitch, cached_fb_format);
  try {
-  PNGWrite(pending_screenshot_path, surface, *rect, lw);
-  write_ack("ok screenshot " + pending_screenshot_path);
+  PNGWrite(path, &tmp, cached_fb_rect, cached_fb_lw);
+  write_ack("ok screenshot " + path);
  } catch(std::exception& e) {
   write_ack(std::string("error screenshot: ") + e.what());
  }
-
- pending_screenshot_path.clear();
 }
 
 static void close_wp_log(void)
@@ -318,15 +328,8 @@ static void process_command(const std::string& line)
   if (path.empty()) {
    write_ack("error screenshot: no path specified");
   } else {
-   // Queue screenshot + auto-advance 1 frame to capture with fresh framebuffer.
-   // do_screenshot runs at start of next Automation_Poll with the rendered surface.
-   // The frame_advance ack is suppressed — only "ok screenshot" is written.
-   pending_screenshot_path = path;
-   frames_to_advance = 1;
-   instruction_paused = false;
-   instructions_to_step = -1;
-   run_to_cycle_target = -1;
-   update_cpu_hook();
+   // Immediate screenshot from cached framebuffer — no frame advance, no PC movement.
+   do_screenshot(path);
   }
  }
  else if (cmd == "input") {
@@ -955,11 +958,25 @@ void Automation_Poll(const MDFN_Surface* surface, const MDFN_Rect* rect, const i
 
  frame_counter++;
 
- // Handle pending screenshot with fresh framebuffer
- bool screenshot_taken = false;
- if (!pending_screenshot_path.empty() && surface && rect) {
-  do_screenshot(surface, rect, lw);
-  screenshot_taken = true;
+ // Cache framebuffer for instant screenshots (no frame advance needed).
+ if (surface && rect && surface->pixels) {
+  // Reallocate if dimensions changed
+  if (!cached_fb_pixels || cached_fb_w != surface->w || cached_fb_h != surface->h
+      || cached_fb_pitch != surface->pitchinpix) {
+   delete[] cached_fb_pixels;
+   delete[] cached_fb_lw;
+   cached_fb_pixels = new uint32_t[surface->pitchinpix * surface->h];
+   cached_fb_lw = new int32[surface->h];
+   cached_fb_w = surface->w;
+   cached_fb_h = surface->h;
+   cached_fb_pitch = surface->pitchinpix;
+  }
+  memcpy(cached_fb_pixels, surface->pixels, surface->pitchinpix * surface->h * sizeof(uint32_t));
+  if (lw) memcpy(cached_fb_lw, lw, surface->h * sizeof(int32));
+  else memset(cached_fb_lw, 0, surface->h * sizeof(int32));
+  cached_fb_rect = *rect;
+  cached_fb_format = surface->format;
+  cached_fb_valid = true;
  }
 
  // Check run_to_frame
@@ -981,9 +998,7 @@ void Automation_Poll(const MDFN_Surface* surface, const MDFN_Rect* rect, const i
     pc_trace_frame_mode = false;
     update_cpu_hook();
     write_ack("done pc_trace_frame frame=" + std::to_string(frame_counter));
-   } else if (!screenshot_taken) {
-    // Suppress frame_advance ack if this frame was auto-advanced for screenshot
-    // (the screenshot ack is the authoritative response)
+   } else {
     write_ack("done frame_advance frame=" + std::to_string(frame_counter));
    }
   }
@@ -1026,6 +1041,9 @@ void Automation_Kill(void)
   write_ack("shutdown frame=" + std::to_string(frame_counter));
   automation_active = false;
   close_wp_log();
+  delete[] cached_fb_pixels;  cached_fb_pixels = nullptr;
+  delete[] cached_fb_lw;      cached_fb_lw = nullptr;
+  cached_fb_valid = false;
  }
 }
 
