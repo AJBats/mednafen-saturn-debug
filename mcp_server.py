@@ -146,7 +146,7 @@ async def boot(cue_path: str = "", timeout: int = 45) -> str:
         f'export DISPLAY=:0; '
         f'rm -f "$HOME/.mednafen/mednafen.lck"; '
         f'"{wsl_path(med_bin)}" '
-        f'--sound 0 --nothrottle 1 --video.blit_timesync 0 '
+        f'--sound 0 '
         f'--automation "{wsl_path(ipc)}" "{wsl_path(cue)}"'
     )
 
