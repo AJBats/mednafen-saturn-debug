@@ -204,8 +204,9 @@ async def frame_advance(count: int = 1) -> str:
 
 
 @mcp.tool()
-async def screenshot(output_path: str = "") -> str:
-    """Screenshot from cached framebuffer (no PC movement). Returns file path."""
+async def screenshot(output_path: str = "", scale: int = 3) -> str:
+    """Screenshot from cached framebuffer (no PC movement). Returns file path.
+    Scale parameter upscales the image (default 3x) for better readability."""
     if not _alive():
         return "FAIL: No session"
     shot = output_path or os.path.join(os.getcwd(), "mcp_screenshot.png")
@@ -216,8 +217,16 @@ async def screenshot(output_path: str = "") -> str:
         return "FAIL: screenshot timed out"
     if "error" in ack:
         return f"FAIL: {ack}"
+    if scale > 1 and os.path.exists(shot):
+        try:
+            from PIL import Image
+            img = Image.open(shot)
+            img = img.resize((img.width * scale, img.height * scale), Image.NEAREST)
+            img.save(shot)
+        except Exception:
+            pass  # If PIL unavailable, keep original size
     size = os.path.getsize(shot) if os.path.exists(shot) else 0
-    return f"OK: Screenshot saved to {shot} ({size} bytes)"
+    return f"OK: Screenshot saved to {shot} ({size} bytes, {scale}x)"
 
 
 @mcp.tool()

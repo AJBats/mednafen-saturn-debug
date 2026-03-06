@@ -19,6 +19,7 @@
  *   dump_slave_regs_bin <path> - Write 22 uint32s for slave SH-2
  *   dump_mem <addr> <size>     - Dump memory (hex), addr in hex, max 4KB text (use dump_mem_bin for larger)
  *   dump_mem_bin <addr> <sz> <path> - Write raw memory bytes to binary file (max 1MB)
+ *   poke <addr> <b0> [b1 ...]    - Write bytes to memory (hex addr, hex bytes). Updates cache.
  *   dump_region <name> <path>  - Dump named region: wram_high wram_low vdp1_vram vdp2_vram vdp2_cram sound_ram
  *   dump_vdp2_regs <path>      - Write VDP2 register state to binary file
  *   dump_cycle                 - Report current absolute master cycle count
@@ -95,6 +96,7 @@
 #include <mednafen/FileStream.h>
 #include "../video/png.h"
 #include "../ss/automation_ss.h"
+#include "video.h"
 
 static FILE* unified_trace_file = nullptr;
 static bool automation_active = false;
@@ -144,8 +146,7 @@ static int32 cached_fb_w = 0, cached_fb_h = 0, cached_fb_pitch = 0;
 static bool cached_fb_valid = false;
 
 // Pending window visibility changes
-static bool pending_show_window = false;
-static bool pending_hide_window = false;
+// show_window/hide_window now call Video_Automation*Window() directly (no pending flag)
 
 // PC trace state
 static FILE* pc_trace_file = nullptr;
@@ -429,6 +430,20 @@ static void process_command(const std::string& line)
    write_ack("ok dump_slave_regs_bin " + path);
   }
  }
+ else if (cmd == "poke") {
+  // Write bytes to memory. Usage: poke <addr_hex> <byte_hex> [byte_hex ...]
+  uint32_t addr = 0;
+  iss >> std::hex >> addr;
+  int count = 0;
+  uint32_t val;
+  while (iss >> std::hex >> val) {
+   MDFN_IEN_SS::Automation_WriteMem8(addr + count, (uint8_t)(val & 0xFF));
+   count++;
+  }
+  char buf[128];
+  snprintf(buf, sizeof(buf), "ok poke 0x%08X %d bytes", addr, count);
+  write_ack(buf);
+ }
  else if (cmd == "dump_mem_bin") {
   uint32_t addr = 0, size = 0;
   std::string path;
@@ -624,11 +639,11 @@ static void process_command(const std::string& line)
   write_ack("ok continue");
  }
  else if (cmd == "show_window") {
-  pending_show_window = true;
+  Video_AutomationShowWindow();
   write_ack("ok show_window");
  }
  else if (cmd == "hide_window") {
-  pending_hide_window = true;
+  Video_AutomationHideWindow();
   write_ack("ok hide_window");
  }
  else if (cmd == "call_trace") {
@@ -1110,19 +1125,13 @@ bool Automation_GetInput(unsigned port, uint8_t* data, unsigned data_size)
 
 bool Automation_ConsumePendingShowWindow(void)
 {
- if (pending_show_window) {
-  pending_show_window = false;
-  return true;
- }
+ // Kept as stub — show_window now calls SDL directly from command handler
  return false;
 }
 
 bool Automation_ConsumePendingHideWindow(void)
 {
- if (pending_hide_window) {
-  pending_hide_window = false;
-  return true;
- }
+ // Kept as stub — hide_window now calls SDL directly from command handler
  return false;
 }
 

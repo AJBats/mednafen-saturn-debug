@@ -598,6 +598,40 @@ uint8 Automation_ReadMem8(uint32 addr)
  return 0xFF; // Unmapped region
 }
 
+void Automation_WriteMem8(uint32 addr, uint8 val)
+{
+ addr &= 0x0FFFFFFF; // Strip mirror bits
+
+ if (addr >= 0x06000000 && addr <= 0x060FFFFF) {
+  // WorkRAMH — stored as big-endian uint16 array
+  uint32 off = addr & 0xFFFFF;
+  uint16& w = WorkRAMH[off >> 1];
+  if (off & 1)
+   w = (w & 0xFF00) | val;
+  else
+   w = (w & 0x00FF) | (val << 8);
+
+  // Invalidate cache line so CPU sees the write
+  uint32 ATM = addr & (0x7FFFF << 10);
+  auto* cent = &CPU[0].Cache[(addr >> 4) & 0x3F];
+  for (int way = 0; way < 4; way++) {
+   if (cent->Tag[way] == ATM) {
+    cent->Data[way][addr & 0x0F] = val;
+   }
+  }
+ }
+ else if (addr >= 0x00200000 && addr <= 0x002FFFFF) {
+  // WorkRAML
+  uint32 off = addr & 0xFFFFF;
+  uint16& w = WorkRAML[off >> 1];
+  if (off & 1)
+   w = (w & 0xFF00) | val;
+  else
+   w = (w & 0x00FF) | (val << 8);
+ }
+ // Other regions not supported for writes
+}
+
 // Automation: bulk memory read — copies backing store directly for speed.
 // Bypasses SH-2 cache (reads physical memory, not CPU's cached view).
 // For regions stored as big-endian uint16 arrays, converts to byte order.
