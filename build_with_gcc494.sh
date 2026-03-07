@@ -55,6 +55,9 @@ make -j$(nproc) \
 # Strip (unstripped binary has 21 sections + 106K COFF symbols, Windows rejects it)
 x86_64-w64-mingw32-strip mednafen.exe
 
+# Also save to stable location (native Linux rebuild does make clean which wipes src/)
+cp -f mednafen.exe ../mednafen_gcc494.exe
+
 echo "=== Output: $(ls -lh mednafen.exe 2>/dev/null || echo 'BUILD FAILED') ==="
 echo "=== Compiler used ==="
 strings mednafen.exe 2>/dev/null | grep "GCC:" | head -3
