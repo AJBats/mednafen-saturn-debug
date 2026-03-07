@@ -487,13 +487,13 @@ async def breakpoint_list() -> str:
 
 
 @mcp.tool()
-async def continue_execution() -> str:
-    """Resume execution until a breakpoint is hit (max 30s timeout)."""
+async def continue_execution(timeout: int = 300) -> str:
+    """Resume execution until a breakpoint or watchpoint fires. Returns enriched ack."""
     if not _alive():
         return "FAIL: No session"
     ack = await _send_and_wait("continue",
-                               ["break", "hit watchpoint"], timeout=30)
-    return ack if ack else "FAIL: no breakpoint or watchpoint hit within 30s"
+                               ["break", "hit watchpoint"], timeout=timeout)
+    return ack if ack else f"TIMEOUT: no break event within {timeout}s"
 
 
 @mcp.tool()
@@ -917,12 +917,18 @@ async def run_to_frame(frame: int) -> str:
 
 
 @mcp.tool()
-async def run_free() -> str:
-    """Unpause emulator (free-run). Use pause() or frame_advance() to stop."""
+async def run_free(wait_for_break: bool = False, timeout: int = 300) -> str:
+    """Unpause emulator (free-run). If wait_for_break=True, block until a
+    breakpoint or watchpoint fires and return the enriched ack with regs + callstack."""
     if not _alive():
         return "FAIL: No session"
     ack = await _send_and_wait("run", "ok run", timeout=5)
-    return ack if ack else "FAIL: timed out"
+    if not ack:
+        return "FAIL: timed out"
+    if not wait_for_break:
+        return ack
+    brk = await _wait_ack(["break ", "hit watchpoint"], timeout=timeout)
+    return brk if brk else f"TIMEOUT: no break event within {timeout}s"
 
 
 @mcp.tool()
