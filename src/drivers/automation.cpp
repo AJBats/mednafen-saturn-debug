@@ -383,7 +383,8 @@ static void process_command(const std::string& line)
   instructions_to_step = -1;
   run_to_cycle_target = -1;
   update_cpu_hook();
-  write_ack("ok run");
+  // No ack -- single-threaded, command is guaranteed to execute.
+  // Next ack will be the break/watchpoint event (no overwrite race).
  }
  else if (cmd == "pause") {
   frames_to_advance = 0;

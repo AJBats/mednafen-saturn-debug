@@ -912,13 +912,11 @@ async def run_free(wait_for_break: bool = False, timeout: int = 300) -> str:
     breakpoint or watchpoint fires and return the enriched ack with regs + callstack."""
     if not _alive():
         return "FAIL: No session"
-    ack = await _send_and_wait("run", "ok run", timeout=5)
-    if not ack:
-        return "FAIL: timed out"
+    _send("run")  # No ack from C++ -- single-threaded, guaranteed to execute
     if not wait_for_break:
-        return ack
-    brk = await _wait_ack(["break ", "hit watchpoint"], timeout=timeout)
-    return brk if brk else f"TIMEOUT: no break event within {timeout}s"
+        return "ok run"
+    ack = await _wait_ack(["break ", "hit watchpoint"], timeout=timeout)
+    return ack if ack else f"TIMEOUT: no break event within {timeout}s"
 
 
 @mcp.tool()
