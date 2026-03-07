@@ -9,7 +9,8 @@ echo "=== Compiler version ==="
 x86_64-w64-mingw32-gcc --version | head -1
 x86_64-w64-mingw32-g++ --version | head -1
 
-cd /mnt/d/Projects/SaturnReverseTest/mednafen
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$SCRIPT_DIR"
 
 # Clean previous build
 cd src
