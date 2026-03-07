@@ -48,19 +48,9 @@ sed -i '/^CPPFLAGS = / { /-DUNICODE/! s|^CPPFLAGS = |CPPFLAGS = -DUNICODE -D_UNI
 sed -i 's|-I/usr/x86_64-w64-mingw32/include ||g' Makefile
 sed -i 's|-L/usr/x86_64-w64-mingw32/lib ||g' Makefile
 
-# mingw_app_type fix
-echo "int mingw_app_type = 1;" > mingw_app_type_fix.c
-x86_64-w64-mingw32-gcc -c mingw_app_type_fix.c -o mingw_app_type_fix.o
-
-# Compile automation stubs (stock ss.cpp doesn't have automation hooks)
-x86_64-w64-mingw32-g++ -std=gnu++11 -fsigned-char -fwrapv -fexceptions \
-  -DHAVE_CONFIG_H -I../include -I../include \
-  -O2 -I$GCC494_SYSROOT/include/SDL2 -DFLAC__NO_DLL \
-  -c -o ss/automation_stubs.o ss/automation_stubs.cpp
-
 # Build
 make -j$(nproc) \
-  LIBS="ss/automation_stubs.o -lFLAC -liconv -lssp -lws2_32 -ldxguid -lwinmm -ldinput -lole32 -ldsound -limm32 -lcfgmgr32 -loleaut32 -lsetupapi -lversion -lhid -lgdi32"
+  LIBS="-lFLAC -liconv -lssp -lws2_32 -ldxguid -lwinmm -ldinput -lole32 -ldsound -limm32 -lcfgmgr32 -loleaut32 -lsetupapi -lversion -lhid -lgdi32"
 
 # Strip (unstripped binary has 21 sections + 106K COFF symbols, Windows rejects it)
 x86_64-w64-mingw32-strip mednafen.exe

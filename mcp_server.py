@@ -114,8 +114,9 @@ def _ipc_path(name):
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def boot(cue_path: str = "", timeout: int = 45) -> str:
-    """Launch Mednafen with a disc image. Starts paused at frame 0."""
+async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> str:
+    """Launch Mednafen with a disc image. Starts paused at frame 0.
+    Set sound=True for interactive play (enables audio and frame pacing)."""
     global _proc, _ack_file, _action_file, _last_ack, _seq, _frame, _ipc_dir
 
     if _alive():
@@ -146,7 +147,7 @@ async def boot(cue_path: str = "", timeout: int = 45) -> str:
         f'export DISPLAY=:0; '
         f'rm -f "$HOME/.mednafen/mednafen.lck"; '
         f'"{wsl_path(med_bin)}" '
-        f'--sound 0 '
+        f'--sound {"1" if sound else "0"} '
         f'--automation "{wsl_path(ipc)}" "{wsl_path(cue)}"'
     )
 
