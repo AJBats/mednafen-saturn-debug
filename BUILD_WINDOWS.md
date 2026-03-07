@@ -81,6 +81,28 @@ make -j$(nproc) \
 x86_64-w64-mingw32-strip mednafen.exe
 ```
 
+## Native Linux Build (MCP automation)
+
+The MCP debug server runs Mednafen as a native Linux binary inside WSL (not the
+Windows .exe). This build uses system GCC 13 and is only for automation — the audio
+glitch doesn't matter for debugging.
+
+```bash
+cd /mnt/d/Projects/SaturnReverseTest/mednafen
+./configure --disable-nls --disable-sdltest \
+  CFLAGS="-O2 -DFLAC__NO_DLL" CXXFLAGS="-O2 -DFLAC__NO_DLL" \
+  CPPFLAGS="-D_LFS64_LARGEFILE=1"
+
+cd src
+make -j$(nproc)
+# Output: mednafen/src/mednafen (ELF binary, ~22MB)
+```
+
+Prerequisites: `sudo apt install libasound2-dev libjack-dev libsdl2-dev libflac-dev zlib1g-dev`
+
+**WARNING**: Running `build_with_gcc494.sh` does `make clean` and reconfigures for
+Windows cross-compile, which destroys the Linux binary. Rebuild after if needed.
+
 ## Running
 
 Set `MEDNAFEN_HOME` to share config/firmware with the stock install (one-time setup
