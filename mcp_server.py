@@ -141,12 +141,17 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
     script_dir = os.path.dirname(os.path.abspath(__file__))
     med_bin = os.path.join(script_dir, "src", "mednafen.exe")
 
+    # Project-local MEDNAFEN_HOME so multiple instances can run side-by-side
+    med_home = os.path.join(script_dir, "home")
+    os.makedirs(med_home, exist_ok=True)
+
     # Remove stale lockfile
-    med_home = os.environ.get("MEDNAFEN_HOME",
-                              os.path.join(os.path.expanduser("~"), ".mednafen"))
     lockfile = os.path.join(med_home, "mednafen.lck")
     if os.path.exists(lockfile):
         os.remove(lockfile)
+
+    env = os.environ.copy()
+    env["MEDNAFEN_HOME"] = med_home
 
     stderr_f = tempfile.NamedTemporaryFile(mode="w", suffix="_med.txt", delete=False)
     _proc = subprocess.Popen(
@@ -155,6 +160,7 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=stderr_f,
+        env=env,
     )
 
     _last_ack = ""

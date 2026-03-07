@@ -32,3 +32,6 @@ __pycache__/
 /src/mingw_app_type_fix.c
 /src/stderr.txt
 /src/stdout.txt
+/home/*
+!/home/mednafen.cfg
+/src/portable.txt
