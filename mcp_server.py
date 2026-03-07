@@ -487,16 +487,6 @@ async def breakpoint_list() -> str:
 
 
 @mcp.tool()
-async def continue_execution(timeout: int = 300) -> str:
-    """Resume execution until a breakpoint or watchpoint fires. Returns enriched ack."""
-    if not _alive():
-        return "FAIL: No session"
-    ack = await _send_and_wait("continue",
-                               ["break", "hit watchpoint"], timeout=timeout)
-    return ack if ack else f"TIMEOUT: no break event within {timeout}s"
-
-
-@mcp.tool()
 async def step(count: int = 1) -> str:
     """Execute N CPU instructions (step into). Default 1."""
     if not _alive():

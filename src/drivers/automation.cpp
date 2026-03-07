@@ -32,7 +32,6 @@
  *   breakpoint_remove <addr>   - Remove specific PC breakpoint
  *   breakpoint_clear           - Remove all breakpoints
  *   breakpoint_list            - List active breakpoints
- *   continue                   - Resume execution (until next breakpoint or frame end)
  *   call_trace <path>          - Start logging JSR/BSR/BSRF calls to text file
  *   call_trace_stop            - Stop call trace logging
  *   unified_trace <path>       - Combined call trace + CD Block events
@@ -639,17 +638,6 @@ static void process_command(const std::string& line)
    ss << buf;
   }
   write_ack(ss.str());
- }
- else if (cmd == "continue") {
-  instruction_paused = false;  // unblock instruction-level pause
-  watchpoint_paused = false;   // unblock watchpoint pause
-  instructions_to_step = -1;   // no step counting
-  run_to_cycle_target = -1;    // cancel cycle target
-  // Unblock frame-level pause -- will run until breakpoint or next pause command
-  if (frames_to_advance == 0)
-   frames_to_advance = -1;
-  update_cpu_hook();
-  write_ack("ok continue");
  }
  else if (cmd == "show_window") {
   Video_AutomationShowWindow();
@@ -1265,7 +1253,7 @@ bool Automation_DebugHook(uint32_t pc)
 
  // Spin-wait for commands while paused at instruction level.
  // This blocks the SH-2 CPU loop. Commands like dump_regs, dump_mem,
- // step, continue, breakpoint all work during this pause because
+ // step, run, breakpoint all work during this pause because
  // check_action_file -> process_command handles them.
  while (instruction_paused && automation_active) {
 #ifdef WIN32
