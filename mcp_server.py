@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mednafen MCP Server v2 — full debug bridge for Claude Code.
 
-Architecture: Claude Code --(stdio/MCP)--> this server --(file IPC)--> WSL Mednafen
+Architecture: Claude Code --(stdio/MCP)--> this server --(file IPC)--> Mednafen (Windows)
 
 All tools follow the same pattern:
   1. Check _alive()
@@ -29,12 +29,10 @@ mcp = FastMCP("mednafen")
 # ---------------------------------------------------------------------------
 
 def wsl_path(win_path):
-    """Convert Windows path to WSL path."""
-    if not win_path or ":" not in win_path[:3]:
+    """Normalize path for the emulator (forward slashes)."""
+    if not win_path:
         return win_path
-    drive = win_path[0].lower()
-    rest = win_path[2:].replace("\\", "/")
-    return f"/mnt/{drive}{rest}"
+    return win_path.replace("\\", "/")
 
 
 def _strip_hex(s):
@@ -141,19 +139,19 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
             os.remove(f)
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    med_bin = os.path.join(script_dir, "src", "mednafen")
+    med_bin = os.path.join(script_dir, "src", "mednafen.exe")
 
-    launch = (
-        f'export DISPLAY=:0; '
-        f'rm -f "$HOME/.mednafen/mednafen.lck"; '
-        f'"{wsl_path(med_bin)}" '
-        f'--sound {"1" if sound else "0"} '
-        f'--automation "{wsl_path(ipc)}" "{wsl_path(cue)}"'
-    )
+    # Remove stale lockfile
+    med_home = os.environ.get("MEDNAFEN_HOME",
+                              os.path.join(os.path.expanduser("~"), ".mednafen"))
+    lockfile = os.path.join(med_home, "mednafen.lck")
+    if os.path.exists(lockfile):
+        os.remove(lockfile)
 
     stderr_f = tempfile.NamedTemporaryFile(mode="w", suffix="_med.txt", delete=False)
     _proc = subprocess.Popen(
-        ["wsl", "-d", "Ubuntu", "-e", "bash", "-c", launch],
+        [med_bin, "--sound", "1" if sound else "0",
+         "--automation", ipc, cue],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=stderr_f,
