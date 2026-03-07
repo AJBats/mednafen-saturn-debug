@@ -28,3 +28,7 @@
 /src/ss/Makefile
 /build-win64/
 __pycache__/
+*.exe
+/src/mingw_app_type_fix.c
+/src/stderr.txt
+/src/stdout.txt
