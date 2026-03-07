@@ -46,6 +46,7 @@
  *   cdb_trace_stop             - Stop CD Block trace
  *   input_trace <path>         - Log real keyboard button presses/releases with frame numbers
  *   input_trace_stop           - Stop input trace logging
+ *   call_stack [scan_size]     - Heuristic SH-2 call stack (scans stack for return addresses)
  *   watchpoint <addr>          - Break on memory write to addr (hex), reports PC+old+new value
  *   watchpoint_clear           - Remove memory watchpoint
  *   vdp2_watchpoint <lo> <hi> <path> - Watch VDP2 address range
@@ -422,6 +423,12 @@ static void process_command(const std::string& line)
  }
  else if (cmd == "dump_slave_regs") {
   write_ack(MDFN_IEN_SS::Automation_DumpSlaveRegs());
+ }
+ else if (cmd == "call_stack") {
+  uint32_t scan = 0x400;  // default 1024 bytes
+  iss >> std::hex >> scan;
+  if (scan > 0x1000) scan = 0x1000;
+  write_ack(MDFN_IEN_SS::Automation_CallStack(scan));
  }
  else if (cmd == "dump_slave_regs_bin") {
   std::string path;
@@ -1173,7 +1180,12 @@ void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint
  snprintf(msg, sizeof(msg),
   "hit watchpoint pc=0x%08X pr=0x%08X addr=0x%08X old=0x%08X new=0x%08X source=%s frame=%llu",
   pc, pr, addr, old_val, new_val, source, (unsigned long long)frame_counter);
- write_ack(msg);
+
+ // Auto-context: append registers + call stack
+ std::string full_msg = msg;
+ full_msg += "\n" + MDFN_IEN_SS::Automation_DumpRegs();
+ full_msg += "\n" + MDFN_IEN_SS::Automation_CallStack(0x400);
+ write_ack(full_msg);
 
  watchpoint_paused = true;
  while (watchpoint_paused && automation_active) {
@@ -1244,7 +1256,12 @@ bool Automation_DebugHook(uint32_t pc)
  else
   snprintf(msg, sizeof(msg), "done step pc=0x%08X frame=%llu",
    real_pc, (unsigned long long)frame_counter);
- write_ack(msg);
+
+ // Auto-context: append registers + call stack to every break event
+ std::string full_msg = msg;
+ full_msg += "\n" + MDFN_IEN_SS::Automation_DumpRegs();
+ full_msg += "\n" + MDFN_IEN_SS::Automation_CallStack(0x400);
+ write_ack(full_msg);
 
  // Spin-wait for commands while paused at instruction level.
  // This blocks the SH-2 CPU loop. Commands like dump_regs, dump_mem,

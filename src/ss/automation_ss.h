@@ -27,6 +27,7 @@ namespace MDFN_IEN_SS {
  // Register dumps
  std::string Automation_DumpRegs(void);
  void Automation_DumpRegsBin(const char* path);
+ std::string Automation_CallStack(uint32 scan_size);
  std::string Automation_DumpSlaveRegs(void);
  void Automation_DumpSlaveRegsBin(const char* path);
  void Automation_DumpVDP2RegsBin(const char* path);

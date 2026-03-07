@@ -740,6 +740,52 @@ void Automation_DumpRegsBin(const char* path)
  }
 }
 
+// Automation: heuristic SH-2 call stack walker.
+// Reads PC, PR, SP from CPU[0], then scans stack upward for values
+// that look like return addresses (2-byte aligned, in known code regions).
+std::string Automation_CallStack(uint32 scan_size)
+{
+ uint32 pc = CPU[0].PC;
+ uint32 pr = CPU[0].PR;
+ uint32 sp = CPU[0].R[15];
+
+ std::string s = "call_stack";
+ char buf[128];
+
+ snprintf(buf, sizeof(buf), " PC=0x%08X SP=0x%08X PR=0x%08X", pc, sp, pr);
+ s += buf;
+
+ // PR is the immediate return address
+ if (pr != 0) {
+  snprintf(buf, sizeof(buf), " | PR->0x%08X", pr);
+  s += buf;
+ }
+
+ // Scan stack upward from SP for return addresses
+ int count = 0;
+ for (uint32 off = 0; off < scan_size; off += 4) {
+  uint32 val = ((uint32)Automation_ReadMem8(sp + off) << 24)
+             | ((uint32)Automation_ReadMem8(sp + off + 1) << 16)
+             | ((uint32)Automation_ReadMem8(sp + off + 2) << 8)
+             |  (uint32)Automation_ReadMem8(sp + off + 3);
+  if (val & 1) continue;  // SH-2: must be 2-byte aligned
+  const char* region = nullptr;
+  if (val < 0x00100000) region = "BIOS";
+  else if (val >= 0x00200000 && val < 0x00300000) region = "LWR";
+  else if (val >= 0x06000000 && val < 0x06100000) region = "HWR";
+  if (region) {
+   snprintf(buf, sizeof(buf), " | SP+0x%03X->0x%08X[%s]", off, val, region);
+   s += buf;
+   count++;
+  }
+ }
+
+ snprintf(buf, sizeof(buf), " | total=%d", count);
+ s += buf;
+
+ return s;
+}
+
 // Automation: dump slave SH-2 CPU registers as a formatted string.
 std::string Automation_DumpSlaveRegs(void)
 {

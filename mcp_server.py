@@ -434,6 +434,16 @@ async def dump_regs_binary() -> str:
     return "\n".join(lines)
 
 
+@mcp.tool()
+async def call_stack(scan_size: int = 1024) -> str:
+    """Heuristic SH-2 call stack. Scans stack for return addresses in code regions."""
+    if not _alive():
+        return "FAIL: No session"
+    sz = min(scan_size, 4096)
+    ack = await _send_and_wait(f"call_stack {sz:x}", "call_stack", timeout=10)
+    return ack if ack else "FAIL: call_stack timed out"
+
+
 # ---------------------------------------------------------------------------
 # Breakpoints & stepping
 # ---------------------------------------------------------------------------
