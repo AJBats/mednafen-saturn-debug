@@ -318,6 +318,7 @@ static void process_command(const std::string& line)
   if (n < 1) n = 1;
   frames_to_advance = n;
   instruction_paused = false;   // unblock instruction-level pause
+  watchpoint_paused = false;    // unblock watchpoint pause
   instructions_to_step = -1;    // cancel step mode
   run_to_cycle_target = -1;     // cancel cycle target
   update_cpu_hook();
@@ -368,6 +369,7 @@ static void process_command(const std::string& line)
   run_to_frame_target = n;
   frames_to_advance = -1;  // free-run until target
   instruction_paused = false;
+  watchpoint_paused = false;
   instructions_to_step = -1;
   run_to_cycle_target = -1;
   update_cpu_hook();
@@ -377,6 +379,7 @@ static void process_command(const std::string& line)
   frames_to_advance = -1;
   run_to_frame_target = -1;
   instruction_paused = false;
+  watchpoint_paused = false;
   instructions_to_step = -1;
   run_to_cycle_target = -1;
   update_cpu_hook();
@@ -571,6 +574,7 @@ static void process_command(const std::string& line)
     pc_trace_frame_mode = true;
     frames_to_advance = 1;
     instruction_paused = false;   // unblock instruction-level pause
+    watchpoint_paused = false;    // unblock watchpoint pause
     instructions_to_step = -1;    // cancel step mode
     run_to_cycle_target = -1;     // cancel cycle target
     update_cpu_hook();
@@ -584,6 +588,7 @@ static void process_command(const std::string& line)
   if (n < 1) n = 1;
   instructions_to_step = n;
   instruction_paused = false;  // unblock instruction-level pause if active
+  watchpoint_paused = false;   // unblock watchpoint pause
   // Unblock frame-level pause -- the CPU hook will pause us after N instructions
   if (frames_to_advance == 0)
    frames_to_advance = -1;
@@ -630,6 +635,7 @@ static void process_command(const std::string& line)
  }
  else if (cmd == "continue") {
   instruction_paused = false;  // unblock instruction-level pause
+  watchpoint_paused = false;   // unblock watchpoint pause
   instructions_to_step = -1;   // no step counting
   run_to_cycle_target = -1;    // cancel cycle target
   // Unblock frame-level pause -- will run until breakpoint or next pause command
@@ -836,6 +842,7 @@ static void process_command(const std::string& line)
   }
   run_to_cycle_target = n;
   instruction_paused = false;
+  watchpoint_paused = false;
   instructions_to_step = -1;
   if (frames_to_advance == 0)
    frames_to_advance = -1;
@@ -1157,12 +1164,27 @@ void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint
   fflush(wp_log);
  }
 
- // Also write to ack so the test script can detect hits
+ // Write ack and pause execution.
+ // This spin-waits inside the memory bus write path (BusRW_DB_CS3).
+ // Safe because Mednafen is single-threaded: both CPUs, DMA, and all
+ // peripherals are driven by the same RunLoop_INLINE thread. Nothing
+ // else is running while we spin here.
  char msg[256];
  snprintf(msg, sizeof(msg),
-  "hit watchpoint pc=0x%08X pr=0x%08X old=0x%08X new=0x%08X source=%s frame=%llu",
-  pc, pr, old_val, new_val, source, (unsigned long long)frame_counter);
+  "hit watchpoint pc=0x%08X pr=0x%08X addr=0x%08X old=0x%08X new=0x%08X source=%s frame=%llu",
+  pc, pr, addr, old_val, new_val, source, (unsigned long long)frame_counter);
  write_ack(msg);
+
+ watchpoint_paused = true;
+ while (watchpoint_paused && automation_active) {
+#ifdef WIN32
+  Sleep(10);
+#else
+  struct timespec ts = {0, 10000000}; // 10ms
+  nanosleep(&ts, NULL);
+#endif
+  check_action_file();
+ }
 }
 
 bool Automation_DebugHook(uint32_t pc)

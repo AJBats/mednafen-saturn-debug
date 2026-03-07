@@ -72,8 +72,10 @@ def _send(cmd):
 
 
 async def _wait_ack(keyword, timeout=30):
-    """Poll ack file for a line containing keyword."""
+    """Poll ack file for a line containing keyword.
+    keyword can be a string or a list of strings (matches any)."""
     global _last_ack
+    keywords = [keyword] if isinstance(keyword, str) else keyword
     deadline = time.time() + timeout
     while time.time() < deadline:
         if _proc and _proc.poll() is not None:
@@ -85,7 +87,7 @@ async def _wait_ack(keyword, timeout=30):
             except (IOError, PermissionError):
                 await asyncio.sleep(0.05)
                 continue
-            if content != _last_ack and keyword in content:
+            if content != _last_ack and any(k in content for k in keywords):
                 _last_ack = content
                 return content
         await asyncio.sleep(0.05)
@@ -201,8 +203,11 @@ async def frame_advance(count: int = 1) -> str:
     global _frame
     if not _alive():
         return "FAIL: No session"
-    ack = await _send_and_wait(f"frame_advance {count}", "done frame_advance", timeout=180)
+    ack = await _send_and_wait(f"frame_advance {count}",
+                               ["done frame_advance", "hit watchpoint"], timeout=180)
     if ack:
+        if "hit watchpoint" in ack:
+            return ack
         _frame += count
         return f"OK: Advanced {count} frames. Now at frame {_frame}"
     return "FAIL: frame_advance timed out"
@@ -476,8 +481,9 @@ async def continue_execution() -> str:
     """Resume execution until a breakpoint is hit (max 30s timeout)."""
     if not _alive():
         return "FAIL: No session"
-    ack = await _send_and_wait("continue", "break", timeout=30)
-    return ack if ack else "FAIL: no breakpoint hit within 30s"
+    ack = await _send_and_wait("continue",
+                               ["break", "hit watchpoint"], timeout=30)
+    return ack if ack else "FAIL: no breakpoint or watchpoint hit within 30s"
 
 
 @mcp.tool()
@@ -485,7 +491,8 @@ async def step(count: int = 1) -> str:
     """Execute N CPU instructions (step into). Default 1."""
     if not _alive():
         return "FAIL: No session"
-    ack = await _send_and_wait(f"step {count}", "done step", timeout=30)
+    ack = await _send_and_wait(f"step {count}",
+                               ["done step", "hit watchpoint"], timeout=30)
     return ack if ack else "FAIL: step timed out"
 
 
