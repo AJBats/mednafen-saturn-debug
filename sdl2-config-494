@@ -1,0 +1,10 @@
+#!/bin/bash
+prefix=/opt/gcc-4.9.4-mingw64/x86_64-w64-mingw32
+for arg in "$@"; do
+  case "$arg" in
+    --version) echo "2.30.10" ;;
+    --cflags)  echo "-I${prefix}/include/SDL2 -Dmain=SDL_main" ;;
+    --libs)    echo "-L${prefix}/lib -lmingw32 -lSDL2main -lSDL2 -mwindows" ;;
+    --static-libs) echo "-L${prefix}/lib -lmingw32 -lSDL2main -lSDL2 -mwindows -ldinput8 -ldxguid -ldxerr8 -luser32 -lgdi32 -lwinmm -limm32 -lole32 -loleaut32 -lshell32 -lsetupapi -lversion -luuid" ;;
+  esac
+done
