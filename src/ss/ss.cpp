@@ -1036,7 +1036,7 @@ void Automation_UnifiedLineWritten(void)
  s_unified_line_count++;
 
  // Start trigger
- if(s_insn_trace_start_line >= 0 && s_unified_line_count == s_insn_trace_start_line && !s_insn_trace_active)
+ if(s_insn_trace_start_line >= 0 && s_unified_line_count >= s_insn_trace_start_line && !s_insn_trace_active)
  {
   s_insn_trace_active = true;
   if(s_insn_trace_unified && CPU[0].CallTraceFile)
@@ -1070,6 +1070,7 @@ void Automation_UnifiedLineWritten(void)
    fflush(s_insn_trace_file);
   }
   s_insn_trace_active = false;
+  s_insn_trace_start_line = -1;  // Prevent re-trigger after stop
   CPU[0].InsnTraceFile = nullptr;
   CPU[1].InsnTraceFile = nullptr;
  }

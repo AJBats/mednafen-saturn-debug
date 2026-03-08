@@ -1189,6 +1189,181 @@ async def memory_filter_candidates(candidates: str, mode: str = "changed", width
 
 
 # ---------------------------------------------------------------------------
+# High-level workflows
+# ---------------------------------------------------------------------------
+
+# BIOS skip sequence — press START at frame 146 to skip the intro
+_BIOS_SKIP = [
+    (146, "input START"),
+    (152, "input_release START"),
+]
+
+
+@mcp.tool()
+async def capture_trace(
+    cue_path: str = "",
+    frames: int = 1500,
+    output_path: str = "",
+    skip_bios: bool = True,
+    dma: bool = False,
+    mem_profile_lo: str = "",
+    mem_profile_hi: str = "",
+    insn_after_event: int = 0,
+    insn_until_event: int = 0,
+) -> str:
+    """Boot a disc, capture a unified trace for N frames, then quit.
+
+    All-in-one trace capture. Boots Mednafen, records a unified trace
+    (SH-2 function calls + CD block I/O), advances the specified number
+    of frames, stops everything, quits, and returns a summary.
+
+    The unified trace always runs. Each line is one EVENT — a function
+    call (JSR/BSR) or a CD block state change. Events are numbered
+    starting at line 3 (lines 1-2 are the header).
+
+    Optional layers (all off by default):
+
+      dma=True              Also log SCU DMA transfers (separate file).
+
+      mem_profile_lo/hi     Also log CPU writes in an address range
+                            (hex, e.g. "0x06028000"/"0x060FFFFF").
+                            Both must be set. Separate file.
+
+      insn_after_event +    Dump EVERY SH-2 instruction (with full
+      insn_until_event      disassembly + all registers) between two
+                            unified trace event numbers. For example,
+                            insn_after_event=100, insn_until_event=105
+                            logs all instructions that execute between
+                            the 100th and 105th function-call/CD events.
+                            WARNING: even a small event range produces
+                            millions of instruction lines. Use sparingly.
+                            Injected directly into the unified trace file.
+
+    Output files (all in the same directory as output_path):
+      capture_trace.txt     Unified trace (always).
+      dma_trace.txt         DMA log (only if dma=True).
+      mem_profile.txt       Memory write log (only if mem_profile set).
+
+    Returns one summary string with file sizes, or a FAIL message.
+    """
+    # --- Boot ---
+    boot_result = await boot(cue_path=cue_path, timeout=45, sound=False)
+    if not boot_result.startswith("OK"):
+        return f"FAIL: Boot failed — {boot_result}"
+
+    # --- Resolve output paths ---
+    out = output_path or _ipc_path("capture_trace.txt")
+    out_abs = os.path.abspath(out)
+    out_dir = os.path.dirname(out_abs)
+    os.makedirs(out_dir, exist_ok=True)
+    if os.path.exists(out_abs):
+        os.remove(out_abs)
+
+    dma_path = os.path.join(out_dir, "dma_trace.txt")
+    mem_path = os.path.join(out_dir, "mem_profile.txt")
+    do_mem = bool(mem_profile_lo and mem_profile_hi)
+    do_insn = bool(insn_after_event and insn_until_event)
+
+    # --- Start unified trace (always) ---
+    ack = await _send_and_wait(
+        f"unified_trace {wsl_path(out_abs)}", "ok unified_trace", timeout=10)
+    if not ack:
+        await quit_emulator()
+        return "FAIL: unified_trace command timed out"
+
+    # --- Start optional layers ---
+    if dma:
+        if os.path.exists(dma_path):
+            os.remove(dma_path)
+        await _send_and_wait(
+            f"dma_trace {wsl_path(dma_path)}", "ok dma_trace", timeout=5)
+
+    if do_mem:
+        if os.path.exists(mem_path):
+            os.remove(mem_path)
+        lo = _strip_hex(mem_profile_lo)
+        hi = _strip_hex(mem_profile_hi)
+        await _send_and_wait(
+            f"mem_profile {lo} {hi} {wsl_path(mem_path)}", "ok mem_profile", timeout=5)
+
+    if do_insn:
+        # Unified trace has a 2-line header; first real event is line 3.
+        effective_start = max(insn_after_event, 3)
+        await _send_and_wait(
+            f"insn_trace_unified {effective_start} {insn_until_event}",
+            "ok insn_trace_unified", timeout=5)
+
+    # --- Advance with BIOS skip ---
+    current_frame = 0
+    if skip_bios:
+        for target_frame, cmd in _BIOS_SKIP:
+            if target_frame >= frames:
+                break
+            delta = target_frame - current_frame
+            if delta > 0:
+                fa_ack = await _send_and_wait(
+                    f"frame_advance {delta}",
+                    ["done frame_advance", "hit watchpoint"], timeout=180)
+                if not fa_ack or not _alive():
+                    await quit_emulator()
+                    return f"FAIL: Died during frame advance (reached frame {current_frame} of {frames})"
+                current_frame = target_frame
+            await _send_and_wait(cmd, "ok", timeout=5)
+
+    remaining = frames - current_frame
+    if remaining > 0:
+        fa_ack = await _send_and_wait(
+            f"frame_advance {remaining}",
+            ["done frame_advance", "hit watchpoint"], timeout=600)
+        if not fa_ack or not _alive():
+            await quit_emulator()
+            return f"FAIL: Died during frame advance (reached frame {current_frame} of {frames})"
+
+    # --- Stop everything and quit ---
+    if do_insn:
+        await _send_and_wait("insn_trace_stop", "insn_trace_stop", timeout=5)
+    if do_mem:
+        await _send_and_wait("mem_profile_stop", "ok mem_profile_stop", timeout=5)
+    if dma:
+        await _send_and_wait("dma_trace_stop", "ok dma_trace_stop", timeout=5)
+    await _send_and_wait("unified_trace_stop", "ok unified_trace_stop", timeout=10)
+    await quit_emulator()
+
+    # --- Report ---
+    def _file_stats(path):
+        if not os.path.exists(path):
+            return None
+        sz = os.path.getsize(path)
+        n = 0
+        with open(path, "r", errors="replace") as f:
+            for _ in f:
+                n += 1
+        return (sz, n)
+
+    stats = _file_stats(out_abs)
+    if not stats:
+        return f"FAIL: Trace file not found at {out_abs}"
+
+    parts = [f"OK: Captured {frames} frames"]
+    parts.append(f"  unified: {out_abs} ({stats[0]:,} bytes, {stats[1]:,} lines)")
+
+    if dma:
+        ds = _file_stats(dma_path)
+        if ds:
+            parts.append(f"  dma: {dma_path} ({ds[0]:,} bytes, {ds[1]:,} lines)")
+
+    if do_mem:
+        ms = _file_stats(mem_path)
+        if ms:
+            parts.append(f"  mem_profile: {mem_path} ({ms[0]:,} bytes, {ms[1]:,} lines)")
+
+    if do_insn:
+        parts.append(f"  insn_trace: all instructions between events {insn_after_event}-{insn_until_event} (in unified file)")
+
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Escape hatch
 # ---------------------------------------------------------------------------
 
