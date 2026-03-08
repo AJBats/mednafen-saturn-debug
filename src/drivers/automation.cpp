@@ -46,7 +46,8 @@
  *   input_trace <path>         - Log real keyboard button presses/releases with frame numbers
  *   input_trace_stop           - Stop input trace logging
  *   call_stack [scan_size]     - Heuristic SH-2 call stack (scans stack for return addresses)
- *   watchpoint <addr>          - Break on memory write to addr (hex), reports PC+old+new value
+ *   watchpoint <addr> [eq <val>] - Break on memory write to addr (hex), reports PC+old+new value
+ *                                 Optional: "eq <val>" only fires when new value == val
  *   watchpoint_clear           - Remove memory watchpoint
  *   vdp2_watchpoint <lo> <hi> <path> - Watch VDP2 address range
  *   vdp2_watchpoint_clear      - Remove VDP2 watchpoint
@@ -171,6 +172,8 @@ static bool watchpoint_active = false;
 static uint32_t watchpoint_addr = 0;
 static bool watchpoint_paused = false;  // true when paused on watchpoint hit
 static FILE* wp_log = nullptr;          // watchpoint hit log file
+static bool watchpoint_filter_active = false;  // conditional: only fire on specific value
+static uint32_t watchpoint_filter_value = 0;   // value to match (when filter active)
 
 // Input trace state -- logs real keyboard input changes with frame numbers
 static FILE* input_trace_file = nullptr;
@@ -755,12 +758,26 @@ static void process_command(const std::string& line)
   watchpoint_addr = addr;
   watchpoint_active = true;
   watchpoint_paused = false;
+  watchpoint_filter_active = false;
+  watchpoint_filter_value = 0;
   // Close stale log from previous watchpoint
   close_wp_log();
   MDFN_IEN_SS::Automation_SetWatchpoint(addr);
+  // Parse optional condition: "watchpoint <addr> eq <value>"
+  std::string condition;
+  if (iss >> condition && condition == "eq") {
+   uint32_t filter_val = 0;
+   iss >> std::hex >> filter_val;
+   watchpoint_filter_active = true;
+   watchpoint_filter_value = filter_val;
+   MDFN_IEN_SS::Automation_SetWatchpointFilter(true, filter_val);
+  }
   update_cpu_hook();
-  char buf[64];
-  snprintf(buf, sizeof(buf), "ok watchpoint 0x%08X", addr);
+  char buf[128];
+  if (watchpoint_filter_active)
+   snprintf(buf, sizeof(buf), "ok watchpoint 0x%08X eq 0x%08X", addr, watchpoint_filter_value);
+  else
+   snprintf(buf, sizeof(buf), "ok watchpoint 0x%08X", addr);
   write_ack(buf);
  }
  else if (cmd == "watchpoint_clear") {
@@ -1152,7 +1169,12 @@ void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint
  if (!wp_log) {
   std::string path = auto_base_dir + "/watchpoint_hits.txt";
   wp_log = fopen(path.c_str(), "w");
-  if (wp_log) fprintf(wp_log, "# Watchpoint hits for addr 0x%08X\n", watchpoint_addr);
+  if (wp_log) {
+   if (watchpoint_filter_active)
+    fprintf(wp_log, "# Watchpoint hits for addr 0x%08X (filter: eq 0x%08X)\n", watchpoint_addr, watchpoint_filter_value);
+   else
+    fprintf(wp_log, "# Watchpoint hits for addr 0x%08X\n", watchpoint_addr);
+  }
  }
  if (wp_log) {
   fprintf(wp_log, "pc=0x%08X pr=0x%08X addr=0x%08X old=0x%08X new=0x%08X source=%s frame=%llu\n",
@@ -1170,8 +1192,23 @@ void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint
   "hit watchpoint pc=0x%08X pr=0x%08X addr=0x%08X old=0x%08X new=0x%08X source=%s frame=%llu",
   pc, pr, addr, old_val, new_val, source, (unsigned long long)frame_counter);
 
+ // If run_to_frame or run_to_cycle was active, cancel it and prefix ack
+ // so the MCP caller's ack matcher sees completion (with early-stop info).
+ std::string full_msg;
+ if (run_to_frame_target >= 0) {
+  full_msg = "done run_to_frame frame=" + std::to_string(frame_counter)
+           + " STOPPED_BY_WATCHPOINT " + msg;
+  run_to_frame_target = -1;
+  frames_to_advance = 0;  // pause
+ } else if (run_to_cycle_target >= 0) {
+  full_msg = "done run_to_cycle STOPPED_BY_WATCHPOINT " + std::string(msg);
+  run_to_cycle_target = -1;
+  frames_to_advance = 0;
+ } else {
+  full_msg = msg;
+ }
+
  // Auto-context: append registers + call stack
- std::string full_msg = msg;
  full_msg += "\n" + MDFN_IEN_SS::Automation_DumpRegs();
  full_msg += "\n" + MDFN_IEN_SS::Automation_CallStack(0x400);
  write_ack(full_msg);

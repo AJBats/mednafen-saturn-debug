@@ -158,6 +158,8 @@ static void (*s_automation_inline_hook)(void) = nullptr;
 // Placed before scu.inc so both BusRW_DB_CS3 and SCU DMA_Write can access.
 static bool automation_wp_active = false;
 static uint32 automation_wp_addr = 0;       // Work RAM High offset (masked to 0xFFFFF)
+static bool automation_wp_filter_active = false;  // Conditional watchpoint: only fire on specific value
+static uint32 automation_wp_filter_value = 0;     // Value to match (when filter is active)
 
 // Automation: VDP2 VRAM write watchpoint (logs ALL writes in an address range)
 static bool automation_vdp2wp_active = false;
@@ -444,7 +446,7 @@ static INLINE void BusRW_DB_CS3(const uint32 A, uint32& DB, const bool BurstHax,
  if(IsWrite && MDFN_UNLIKELY(wp_match))
  {
   uint32 wp_new = ne16_rbo_be<uint32>(WorkRAMH, automation_wp_addr & 0xFFFFC);
-  if(wp_new != wp_old)
+  if(wp_new != wp_old && (!automation_wp_filter_active || wp_new == automation_wp_filter_value))
    ::Automation_WatchpointHit(CPU[0].PC, A, wp_old, wp_new, CPU[0].PR, "CPU");
  }
 }
@@ -859,11 +861,21 @@ void Automation_SetWatchpoint(uint32 addr)
 {
  automation_wp_addr = addr & 0xFFFFF;  // Mask to Work RAM High offset
  automation_wp_active = true;
+ automation_wp_filter_active = false;
+ automation_wp_filter_value = 0;
 }
 
 void Automation_ClearWatchpoint(void)
 {
  automation_wp_active = false;
+ automation_wp_filter_active = false;
+ automation_wp_filter_value = 0;
+}
+
+void Automation_SetWatchpointFilter(bool active, uint32 value)
+{
+ automation_wp_filter_active = active;
+ automation_wp_filter_value = value;
 }
 
 bool Automation_CheckWatchpointActive(void)

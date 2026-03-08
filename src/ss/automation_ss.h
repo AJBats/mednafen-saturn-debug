@@ -48,6 +48,7 @@ namespace MDFN_IEN_SS {
 
  // Memory watchpoints
  void Automation_SetWatchpoint(uint32 addr);
+ void Automation_SetWatchpointFilter(bool active, uint32 value);
  void Automation_ClearWatchpoint(void);
  bool Automation_CheckWatchpointActive(void);
  void Automation_SetVDP2Watchpoint(uint32 lo, uint32 hi, const char* logpath);

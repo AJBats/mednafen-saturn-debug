@@ -501,15 +501,19 @@ async def step(count: int = 1) -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def watchpoint_set(address: str) -> str:
-    """Watch for 4-byte writes to address. Hits logged to watchpoint_hits.txt."""
+async def watchpoint_set(address: str, value: str = "") -> str:
+    """Watch for 4-byte writes to address. Hits logged to watchpoint_hits.txt.
+    Optional: value="0x06037F20" only fires when the new value equals that."""
     if not _alive():
         return "FAIL: No session"
     addr = _strip_hex(address)
     wp_file = _ipc_path("watchpoint_hits.txt")
     if os.path.exists(wp_file):
         os.remove(wp_file)
-    ack = await _send_and_wait(f"watchpoint {addr}", "ok watchpoint", timeout=5)
+    cmd = f"watchpoint {addr}"
+    if value:
+        cmd += f" eq {_strip_hex(value)}"
+    ack = await _send_and_wait(cmd, "ok watchpoint", timeout=5)
     return ack if ack else "FAIL: timed out"
 
 
@@ -895,12 +899,22 @@ async def mem_profile_stop() -> str:
 
 @mcp.tool()
 async def run_to_frame(frame: int) -> str:
-    """Free-run until reaching frame N, then pause."""
+    """Free-run until reaching frame N, then pause. If a watchpoint fires
+    before reaching the target frame, stops early and reports the hit."""
     global _frame
     if not _alive():
         return "FAIL: No session"
-    ack = await _send_and_wait(f"run_to_frame {frame}", "done run_to_frame", timeout=300)
+    ack = await _send_and_wait(f"run_to_frame {frame}",
+                               ["done run_to_frame", "hit watchpoint"],
+                               timeout=300)
     if ack:
+        # Parse actual frame from ack (may differ from target if stopped early)
+        import re
+        m = re.search(r"frame=(\d+)", ack)
+        if m:
+            _frame = int(m.group(1))
+        if "STOPPED_BY_WATCHPOINT" in ack or "hit watchpoint" in ack:
+            return f"STOPPED at frame {_frame} by watchpoint (target was {frame}):\n{ack}"
         _frame = frame
         return f"OK: At frame {frame}"
     return "FAIL: run_to_frame timed out"
@@ -948,11 +962,17 @@ async def dump_cycle() -> str:
 
 @mcp.tool()
 async def run_to_cycle(cycle: int) -> str:
-    """Run until reaching a specific CPU cycle count."""
+    """Run until reaching a specific CPU cycle count. Stops early if a watchpoint fires."""
     if not _alive():
         return "FAIL: No session"
-    ack = await _send_and_wait(f"run_to_cycle {cycle}", "done run_to_cycle", timeout=60)
-    return ack if ack else "FAIL: timed out"
+    ack = await _send_and_wait(f"run_to_cycle {cycle}",
+                               ["done run_to_cycle", "hit watchpoint"],
+                               timeout=60)
+    if ack:
+        if "STOPPED_BY_WATCHPOINT" in ack or "hit watchpoint" in ack:
+            return f"STOPPED by watchpoint (target cycle was {cycle}):\n{ack}"
+        return ack
+    return "FAIL: timed out"
 
 
 # ---------------------------------------------------------------------------

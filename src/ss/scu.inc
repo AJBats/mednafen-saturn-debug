@@ -1625,7 +1625,7 @@ static INLINE void DMA_Write(DMALevelS* d, uint32 DB)
   if(MDFN_UNLIKELY(wp_match_dma))
   {
    uint32 wp_new_dma = ne16_rbo_be<uint32>(WorkRAMH, automation_wp_addr & 0xFFFFC);
-   if(wp_new_dma != wp_old_dma)
+   if(wp_new_dma != wp_old_dma && (!automation_wp_filter_active || wp_new_dma == automation_wp_filter_value))
     ::Automation_WatchpointHit(CPU[0].PC, A, wp_old_dma, wp_new_dma, CPU[0].PR, "DMA");
   }
  }
