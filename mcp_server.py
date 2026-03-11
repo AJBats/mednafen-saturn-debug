@@ -740,8 +740,12 @@ async def save_state(path: str) -> str:
     """Save emulator state to file (gzip, GUI-compatible). Path = Windows path."""
     if not _alive():
         return "FAIL: No session"
-    ack = await _send_and_wait(f"save_state {wsl_path(path)}", "save_state", timeout=10)
-    return f"OK: State saved to {path}" if ack else "FAIL: timed out"
+    ack = await _send_and_wait(f"save_state {wsl_path(path)}", "ok save_state", timeout=10)
+    if not ack:
+        return "FAIL: save_state timed out"
+    if "error" in ack:
+        return f"FAIL: {ack}"
+    return f"OK: State saved to {path}"
 
 
 @mcp.tool()
@@ -751,8 +755,12 @@ async def load_state(path: str) -> str:
         return "FAIL: No session"
     if not os.path.exists(path):
         return f"FAIL: File not found: {path}"
-    ack = await _send_and_wait(f"load_state {wsl_path(path)}", "load_state", timeout=15)
-    return f"OK: State loaded from {path}" if ack else "FAIL: timed out"
+    ack = await _send_and_wait(f"load_state {wsl_path(path)}", "ok load_state", timeout=15)
+    if not ack:
+        return "FAIL: load_state timed out"
+    if "error" in ack:
+        return f"FAIL: {ack}"
+    return f"OK: State loaded from {path}"
 
 
 # ---------------------------------------------------------------------------
