@@ -529,7 +529,7 @@ static void process_command(const std::string& line)
  }
  else if (cmd == "save_state") {
   std::string path;
-  iss >> path;
+  std::getline(iss >> std::ws, path);
   if (path.empty()) {
    write_ack("error save_state: no path");
   } else {
@@ -548,7 +548,7 @@ static void process_command(const std::string& line)
  }
  else if (cmd == "load_state") {
   std::string path;
-  iss >> path;
+  std::getline(iss >> std::ws, path);
   if (path.empty()) {
    write_ack("error load_state: no path");
   } else {
