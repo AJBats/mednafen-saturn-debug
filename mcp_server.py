@@ -59,7 +59,7 @@ _memory_snapshots = {}
 
 
 def _send(cmd):
-    """Write a command to the action file."""
+    """Write a command to the action file (with retry for Windows file locks)."""
     global _seq
     _seq += 1
     padding = "." * (_seq % 16)
@@ -67,6 +67,15 @@ def _send(cmd):
     with open(tmp, "w", newline="\n") as f:
         f.write(f"# {_seq}{padding}\n")
         f.write(cmd + "\n")
+    for _retry in range(20):
+        try:
+            if os.path.exists(_action_file):
+                os.remove(_action_file)
+            os.rename(tmp, _action_file)
+            return
+        except PermissionError:
+            time.sleep(0.02 * (_retry + 1))
+    # Final attempt without catching
     if os.path.exists(_action_file):
         os.remove(_action_file)
     os.rename(tmp, _action_file)
@@ -1400,6 +1409,43 @@ async def raw_command(command: str) -> str:
             return f.read().strip()
     except (IOError, FileNotFoundError):
         return "FAIL: no response"
+
+
+# ---------------------------------------------------------------------------
+# Per-frame memory sampler
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def sample_memory(address: str, size: int = 256, frames: int = 300,
+                        output_path: str = "") -> str:
+    """Dump a memory region every frame for N frames to a binary file.
+    Runs at full emulator speed (no IPC per frame). Output is raw binary:
+    <size> bytes per frame, <frames> frames total. Use tools/blob_to_csv.py
+    to convert to CSV."""
+    if not _alive():
+        return "FAIL: No session"
+    addr = _strip_hex(address)
+    if not output_path:
+        output_path = _ipc_path("mem_sample.bin")
+    ack = await _send_and_wait(
+        f"mem_sample {addr} {size:x} {frames} {wsl_path(output_path)}",
+        ["done mem_sample", "error"], timeout=frames * 2 + 60
+    )
+    if not ack:
+        return "FAIL: mem_sample timed out"
+    if "error" in ack:
+        return f"FAIL: {ack}"
+    file_size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
+    return f"{ack}\nFile: {output_path} ({file_size} bytes)"
+
+
+@mcp.tool()
+async def sample_memory_stop() -> str:
+    """Abort an in-progress memory sample early."""
+    if not _alive():
+        return "FAIL: No session"
+    ack = await _send_and_wait("mem_sample_stop", "mem_sample_stop", timeout=10)
+    return ack if ack else "FAIL: no response"
 
 
 # ---------------------------------------------------------------------------

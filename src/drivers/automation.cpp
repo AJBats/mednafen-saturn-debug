@@ -60,6 +60,8 @@
  *   dma_trace_stop              - Stop DMA trace logging
  *   mem_profile <lo> <hi> <path> - Log writes to address range [lo,hi] to text file
  *   mem_profile_stop            - Stop memory write profiling
+ *   mem_sample <addr> <sz> <frames> <path> - Dump memory region every frame for N frames to binary file
+ *   mem_sample_stop             - Abort memory sampling early
  *   save_state <path>           - Save full emulator state to file
  *   load_state <path>           - Load emulator state from file
  *   deterministic              - Enable deterministic mode (fixed RTC seed)
@@ -109,6 +111,13 @@ static std::string auto_base_dir;
 static uint64_t frame_counter = 0;
 static int64_t frames_to_advance = -1;  // -1 = free-running, 0 = paused, >0 = counting down
 static int64_t run_to_frame_target = -1;
+
+// Per-frame memory sampler: dumps a memory region every frame to binary file
+static FILE*    mem_sample_file = nullptr;
+static uint32_t mem_sample_addr = 0;
+static uint32_t mem_sample_size = 0;
+static int64_t  mem_sample_frames = 0;     // frames remaining
+static int64_t  mem_sample_total = 0;      // total frames requested
 
 // Input state
 // Bit layout matches Mednafen's IDII array order for Saturn digital gamepad:
@@ -924,6 +933,51 @@ static void process_command(const std::string& line)
   MDFN_IEN_SS::Automation_DisableMemProfile();
   write_ack("ok mem_profile_stop");
  }
+ else if (cmd == "mem_sample") {
+  uint32_t addr = 0, sz = 0;
+  int64_t frames = 0;
+  std::string path;
+  iss >> std::hex >> addr >> sz >> std::dec >> frames >> path;
+  if (path.empty() || sz == 0 || frames <= 0) {
+   write_ack("error mem_sample: usage: mem_sample <addr_hex> <size_hex> <frames_dec> <path>");
+  } else {
+   if (sz > 0x10000) sz = 0x10000;  // 64KB max per frame
+   if (mem_sample_file) fclose(mem_sample_file);
+   mem_sample_file = fopen(path.c_str(), "wb");
+   if (mem_sample_file) {
+    mem_sample_addr = addr;
+    mem_sample_size = sz;
+    mem_sample_frames = frames;
+    mem_sample_total = frames;
+    // Free-run — mem_sample_frames controls when to stop
+    frames_to_advance = -1;
+    instruction_paused = false;
+    watchpoint_paused = false;
+    instructions_to_step = -1;
+    run_to_cycle_target = -1;
+    update_cpu_hook();
+    char buf[256];
+    snprintf(buf, sizeof(buf), "ok mem_sample 0x%08X 0x%X %lld %s",
+             addr, sz, (long long)frames, path.c_str());
+    write_ack(buf);
+   } else {
+    write_ack("error mem_sample: cannot open " + path);
+   }
+  }
+ }
+ else if (cmd == "mem_sample_stop") {
+  if (mem_sample_file) {
+   int64_t captured = mem_sample_total - mem_sample_frames;
+   fclose(mem_sample_file);
+   mem_sample_file = nullptr;
+   mem_sample_frames = 0;
+   char buf[128];
+   snprintf(buf, sizeof(buf), "ok mem_sample_stop captured=%lld", (long long)captured);
+   write_ack(buf);
+  } else {
+   write_ack("ok mem_sample_stop (not active)");
+  }
+ }
  else {
   write_ack("error unknown command: " + cmd);
  }
@@ -1020,6 +1074,25 @@ void Automation_Poll(const MDFN_Surface* surface, const MDFN_Rect* rect, const i
   frames_to_advance = 0;  // Pause
   run_to_frame_target = -1;
   write_ack("done run_to_frame frame=" + std::to_string(frame_counter));
+ }
+
+ // Per-frame memory sampler: dump region to binary file each frame
+ if (mem_sample_file && mem_sample_frames > 0) {
+  uint8_t sample_buf[0x10000]; // 64KB max (matches command handler cap)
+  for (uint32_t i = 0; i < mem_sample_size; i++) {
+   sample_buf[i] = MDFN_IEN_SS::Automation_ReadMem8(mem_sample_addr + i);
+  }
+  fwrite(sample_buf, 1, mem_sample_size, mem_sample_file);
+  mem_sample_frames--;
+  if (mem_sample_frames == 0) {
+   fclose(mem_sample_file);
+   mem_sample_file = nullptr;
+   frames_to_advance = 0; // pause emulation
+   char buf[256];
+   snprintf(buf, sizeof(buf), "done mem_sample frames=%lld addr=0x%08X size=0x%X",
+            (long long)mem_sample_total, mem_sample_addr, mem_sample_size);
+   write_ack(buf);
+  }
  }
 
  // Handle frame advance countdown
