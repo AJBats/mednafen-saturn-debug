@@ -13,6 +13,7 @@ Game-agnostic. Game-specific helpers belong in the consuming project.
 
 import os
 import sys
+import re
 import time
 import asyncio
 import subprocess
@@ -194,7 +195,7 @@ async def status() -> str:
     if not _alive():
         return "No session running."
     ack = await _send_and_wait("status", "status", timeout=5)
-    return f"Frame: {_frame}\n{ack or ''}"
+    return f"{ack or ''}"
 
 
 @mcp.tool()
@@ -208,7 +209,12 @@ async def frame_advance(count: int = 1) -> str:
     if ack:
         if "hit watchpoint" in ack:
             return ack
-        _frame += count
+        # Parse real frame from automation ack (e.g. "done frame_advance frame=123")
+        m = re.search(r"frame=(\d+)", ack)
+        if m:
+            _frame = int(m.group(1))
+        else:
+            _frame += count
         return f"OK: Advanced {count} frames. Now at frame {_frame}"
     return "FAIL: frame_advance timed out"
 
@@ -751,6 +757,7 @@ async def save_state(path: str) -> str:
 @mcp.tool()
 async def load_state(path: str) -> str:
     """Load emulator state from file."""
+    global _frame
     if not _alive():
         return "FAIL: No session"
     if not os.path.exists(path):
@@ -760,6 +767,7 @@ async def load_state(path: str) -> str:
         return "FAIL: load_state timed out"
     if "error" in ack:
         return f"FAIL: {ack}"
+    _frame = 0  # Reset — all frame references are relative to save state load
     return f"OK: State loaded from {path}"
 
 

@@ -564,6 +564,7 @@ static void process_command(const std::string& line)
     memcpy(sm.map(), header, 32);
     st.read(sm.map() + 32, st_len - 32);
     MDFNSS_LoadSM(&sm, false);
+    frame_counter = 0;  // Reset to 0 — all frame references are relative to save state load
     write_ack("ok load_state " + path);
    } catch (std::exception& e) {
     write_ack(std::string("error load_state: ") + e.what());
@@ -1103,12 +1104,19 @@ void Automation_LogSystemCommand(const char* cmd_name)
 
 bool Automation_GetInput(unsigned port, uint8_t* data, unsigned data_size)
 {
- // Input tracing: log real keyboard button changes before any override.
- // data[] already contains the real keyboard-mapped gamepad state at this point.
+ // OR automation button presses into the existing data.
+ // NOTE: This is additive -- real keyboard input is NOT suppressed.
+ // Both automation and keyboard presses contribute to the final state.
+ if (automation_active && input_override && port == 0 && data_size >= 2) {
+  data[0] |= (uint8_t)(input_buttons & 0xFF);
+  data[1] |= (uint8_t)((input_buttons >> 8) & 0xFF);
+ }
+
+ // Input tracing: log combined button state (keyboard + automation) AFTER override.
+ // This captures the full input picture — what the game actually sees.
  if (automation_active && input_trace_file && port == 0 && data_size >= 2) {
   uint16_t cur = data[0] | ((uint16_t)data[1] << 8);
   if (cur != last_traced_input) {
-   // Log each button that changed
    static const struct { int bit; const char* name; } btn_names[] = {
     {BTN_Z, "Z"}, {BTN_Y, "Y"}, {BTN_X, "X"}, {BTN_R, "R"},
     {BTN_UP, "UP"}, {BTN_DOWN, "DOWN"}, {BTN_LEFT, "LEFT"}, {BTN_RIGHT, "RIGHT"},
@@ -1129,18 +1137,7 @@ bool Automation_GetInput(unsigned port, uint8_t* data, unsigned data_size)
   }
  }
 
- if (!automation_active || !input_override || port != 0)
-  return false;
-
- // OR automation button presses into the existing data.
- // NOTE: This is additive -- real keyboard input is NOT suppressed.
- // Both automation and keyboard presses contribute to the final state.
- if (data_size >= 2) {
-  data[0] |= (uint8_t)(input_buttons & 0xFF);
-  data[1] |= (uint8_t)((input_buttons >> 8) & 0xFF);
- }
-
- return true;
+ return (automation_active && input_override && port == 0);
 }
 
 bool Automation_ConsumePendingShowWindow(void)
