@@ -12,6 +12,9 @@ x86_64-w64-mingw32-g++ --version | head -1
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Create include symlink (git doesn't preserve symlinks on Windows)
+ln -sfn "$SCRIPT_DIR/src" "$SCRIPT_DIR/include/mednafen"
+
 # Clean previous build
 cd src
 make clean 2>/dev/null || true
