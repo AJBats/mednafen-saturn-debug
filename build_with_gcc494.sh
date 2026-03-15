@@ -13,7 +13,10 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Create include symlink (git doesn't preserve symlinks on Windows)
-ln -sfn "$SCRIPT_DIR/src" "$SCRIPT_DIR/include/mednafen"
+# ln -sfn fails on NTFS directory symlinks ("Is a directory"), so skip if correct
+if [ ! -L "$SCRIPT_DIR/include/mednafen" ]; then
+    ln -sn "$SCRIPT_DIR/src" "$SCRIPT_DIR/include/mednafen"
+fi
 
 # Clean previous build
 cd src
