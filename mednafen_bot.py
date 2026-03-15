@@ -33,7 +33,7 @@ def _win_path(p):
 class MednafenBot:
     """Drives Windows Mednafen via file-based automation IPC."""
 
-    def __init__(self, ipc_dir, cue_path, show=False, verbose=False):
+    def __init__(self, ipc_dir, cue_path, show=False, sound=False, verbose=False):
         self.ipc_dir = ipc_dir
         self.action_file = os.path.join(ipc_dir, "mednafen_action.txt")
         self.ack_file = os.path.join(ipc_dir, "mednafen_ack.txt")
@@ -43,6 +43,7 @@ class MednafenBot:
         self.stderr_file = None
         self.cue_path = cue_path
         self.show = show
+        self.sound = sound
         self.verbose = verbose
 
     def start(self, timeout=45):
@@ -71,7 +72,7 @@ class MednafenBot:
             mode="w", suffix="_mednafen_stderr.txt", delete=False,
         )
         self.proc = subprocess.Popen(
-            [med_bin, "--sound", "0",
+            [med_bin, "--sound", "1" if self.sound else "0",
              "--automation", self.ipc_dir, self.cue_path],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
