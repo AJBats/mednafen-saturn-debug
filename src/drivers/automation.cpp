@@ -45,6 +45,8 @@
  *   cdb_trace_stop             - Stop CD Block trace
  *   input_trace <path>         - Log real keyboard button presses/releases with frame numbers
  *   input_trace_stop           - Stop input trace logging
+ *   input_playback <path>      - Replay recorded input trace (events injected at correct frames)
+ *   input_playback_stop        - Stop input playback
  *   call_stack [scan_size]     - Heuristic SH-2 call stack (scans stack for return addresses)
  *   watchpoint <addr> [eq <val>] - Break on memory write to addr (hex), reports PC+old+new value
  *                                 Optional: "eq <val>" only fires when new value == val
@@ -187,6 +189,19 @@ static uint32_t watchpoint_filter_value = 0;   // value to match (when filter ac
 // Input trace state -- logs real keyboard input changes with frame numbers
 static FILE* input_trace_file = nullptr;
 static uint16_t last_traced_input = 0;
+
+// Input playback state -- replays recorded input traces.
+// Events are loaded into a vector on input_playback <path>.
+// Automation_Poll checks events each frame and adjusts input_buttons.
+struct InputEvent {
+ uint64_t frame;
+ bool press;     // true=press, false=release
+ int button;     // BTN_* enum value
+};
+static std::vector<InputEvent> playback_events;
+static size_t playback_index = 0;        // next event to process
+static bool playback_active = false;
+static uint64_t playback_base_frame = 0; // frame_counter at playback start
 
 // Monotonic sequence counter -- appended to every ack to guarantee uniqueness.
 // This solves change detection on DrvFS (Windows->WSL) where stat() mtime has
@@ -762,6 +777,53 @@ static void process_command(const std::string& line)
   }
   write_ack("ok input_trace_stop");
  }
+ else if (cmd == "input_playback") {
+  std::string path;
+  iss >> path;
+  if (path.empty()) {
+   write_ack("error input_playback: no path");
+  } else {
+   FILE* f = fopen(path.c_str(), "r");
+   if (!f) {
+    write_ack("error input_playback: cannot open " + path);
+   } else {
+    playback_events.clear();
+    playback_index = 0;
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+     // Parse: frame=N PRESS/RELEASE BUTTON
+     uint64_t fr = 0;
+     char action[32] = {0}, button[32] = {0};
+     if (sscanf(line, "frame=%llu %31s %31s", (unsigned long long*)&fr, action, button) == 3) {
+      int b = parse_button(button);
+      if (b >= 0) {
+       InputEvent ev;
+       ev.frame = fr;
+       ev.press = (strcmp(action, "PRESS") == 0);
+       ev.button = b;
+       playback_events.push_back(ev);
+      }
+     }
+    }
+    fclose(f);
+    // Clear current input state for clean playback
+    input_buttons = 0;
+    input_override = false;
+    playback_base_frame = frame_counter;
+    playback_active = true;
+    char buf[256];
+    snprintf(buf, sizeof(buf), "ok input_playback %zu events from %s",
+             playback_events.size(), path.c_str());
+    write_ack(buf);
+   }
+  }
+ }
+ else if (cmd == "input_playback_stop") {
+  playback_active = false;
+  playback_events.clear();
+  playback_index = 0;
+  write_ack("ok input_playback_stop");
+ }
  else if (cmd == "watchpoint") {
   uint32_t addr = 0;
   iss >> std::hex >> addr;
@@ -1074,6 +1136,28 @@ void Automation_Poll(const MDFN_Surface* surface, const MDFN_Rect* rect, const i
   frames_to_advance = 0;  // Pause
   run_to_frame_target = -1;
   write_ack("done run_to_frame frame=" + std::to_string(frame_counter));
+ }
+
+ // Input playback: process events up to and including the current frame.
+ // Apply ALL events that should have fired by now (not just exact matches),
+ // so that frame=0 events work even if Poll first runs at frame 1.
+ if (playback_active) {
+  uint64_t rel_frame = frame_counter - playback_base_frame;
+  while (playback_index < playback_events.size()
+         && playback_events[playback_index].frame <= rel_frame) {
+   const auto& ev = playback_events[playback_index];
+   if (ev.press) {
+    input_buttons |= (1 << ev.button);
+   } else {
+    input_buttons &= ~(1 << ev.button);
+   }
+   input_override = true;
+   playback_index++;
+  }
+  // Auto-stop when all events consumed
+  if (playback_index >= playback_events.size()) {
+   playback_active = false;
+  }
  }
 
  // Per-frame memory sampler: dump region to binary file each frame

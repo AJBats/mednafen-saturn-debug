@@ -667,6 +667,31 @@ async def input_trace_stop() -> str:
 
 
 @mcp.tool()
+async def input_playback_start(path: str) -> str:
+    """Start replaying a recorded input trace file. Events are injected at
+    the correct frame numbers relative to the current frame. Works alongside
+    any other command (sample_memory, run_to_frame, run_free, etc.).
+
+    Load your save state FIRST, then start playback, then run your command.
+    The playback auto-stops when all events are consumed.
+    """
+    if not _alive():
+        return "FAIL: No session"
+    ack = await _send_and_wait(
+        f"input_playback {wsl_path(path)}", "ok input_playback", timeout=5)
+    return ack if ack else "FAIL: timed out"
+
+
+@mcp.tool()
+async def input_playback_stop() -> str:
+    """Stop input playback and clear all playback state."""
+    if not _alive():
+        return "FAIL: No session"
+    ack = await _send_and_wait("input_playback_stop", "ok input_playback_stop", timeout=5)
+    return ack if ack else "FAIL: timed out"
+
+
+@mcp.tool()
 async def scdq_trace_start() -> str:
     """Start CD subsystem event trace."""
     if not _alive():
