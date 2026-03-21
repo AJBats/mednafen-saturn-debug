@@ -154,7 +154,7 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
     med_bin = os.path.join(script_dir, "src", "mednafen.exe")
 
     # Project-local MEDNAFEN_HOME so multiple instances can run side-by-side
-    med_home = os.path.join(script_dir, "home")
+    med_home = os.environ.get("MEDNAFEN_HOME") or os.path.join(script_dir, "home")
     os.makedirs(med_home, exist_ok=True)
 
     # Remove stale lockfile
@@ -214,10 +214,13 @@ async def frame_advance(count: int = 1) -> str:
     if not _alive():
         return "FAIL: No session"
     ack = await _send_and_wait(f"frame_advance {count}",
-                               ["done frame_advance", "hit watchpoint"], timeout=180)
+                               ["done frame_advance", "hit watchpoint", "break pc="],
+                               timeout=180)
     if ack:
         if "hit watchpoint" in ack:
             return ack
+        if "break pc=" in ack:
+            return f"BREAK: {ack}"
         # Parse real frame from automation ack (e.g. "done frame_advance frame=123")
         m = re.search(r"frame=(\d+)", ack)
         if m:
