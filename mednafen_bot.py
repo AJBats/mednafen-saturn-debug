@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 
 MEDNAFEN_DIR = os.path.dirname(os.path.abspath(__file__))
-MEDNAFEN_HOME = os.path.join(MEDNAFEN_DIR, "home")
+_DEFAULT_HOME = os.path.join(MEDNAFEN_DIR, "home")
 
 
 def _find_mednafen():
@@ -33,7 +33,8 @@ def _win_path(p):
 class MednafenBot:
     """Drives Windows Mednafen via file-based automation IPC."""
 
-    def __init__(self, ipc_dir, cue_path, show=False, sound=False, verbose=False):
+    def __init__(self, ipc_dir, cue_path, show=False, sound=False,
+                 home_dir=None, verbose=False):
         self.ipc_dir = ipc_dir
         self.action_file = os.path.join(ipc_dir, "mednafen_action.txt")
         self.ack_file = os.path.join(ipc_dir, "mednafen_ack.txt")
@@ -44,29 +45,35 @@ class MednafenBot:
         self.cue_path = cue_path
         self.show = show
         self.sound = sound
+        self.home_dir = home_dir or _DEFAULT_HOME
         self.verbose = verbose
 
     def start(self, timeout=45):
         """Launch Mednafen and wait for ready ack."""
         med_bin = _find_mednafen()
         os.makedirs(self.ipc_dir, exist_ok=True)
-        os.makedirs(MEDNAFEN_HOME, exist_ok=True)
+        os.makedirs(self.home_dir, exist_ok=True)
 
         # Remove stale lockfile
-        lockfile = os.path.join(MEDNAFEN_HOME, "mednafen.lck")
+        lockfile = os.path.join(self.home_dir, "mednafen.lck")
         try:
             if os.path.exists(lockfile):
                 os.remove(lockfile)
         except PermissionError:
             pass
 
-        # Clean IPC files
-        for f in [self.action_file, self.ack_file]:
-            if os.path.exists(f):
-                os.remove(f)
+        # Clean IPC files — remove ALL files in IPC dir to prevent stale
+        # artifacts from previous sessions (traces, snapshots, etc.)
+        for f in os.listdir(self.ipc_dir):
+            fpath = os.path.join(self.ipc_dir, f)
+            try:
+                if os.path.isfile(fpath):
+                    os.remove(fpath)
+            except (PermissionError, OSError):
+                pass
 
         env = os.environ.copy()
-        env["MEDNAFEN_HOME"] = MEDNAFEN_HOME
+        env["MEDNAFEN_HOME"] = self.home_dir
 
         self.stderr_file = tempfile.NamedTemporaryFile(
             mode="w", suffix="_mednafen_stderr.txt", delete=False,
