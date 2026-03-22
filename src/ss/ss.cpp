@@ -155,9 +155,10 @@ static int64_t automation_total_cycles = 0;
 static void (*s_automation_inline_hook)(void) = nullptr;
 
 // Automation: memory write watchpoint state.
-// Placed before scu.inc so both BusRW_DB_CS3 and SCU DMA_Write can access.
+// Placed before scu.inc so both BusRW_DB_CS3, SCU DMA_Write, and BBusRW_DB can access.
 static bool automation_wp_active = false;
 static uint32 automation_wp_addr = 0;       // Work RAM High offset (masked to 0xFFFFF)
+static uint32 automation_wp_full_addr = 0;  // Full address as provided by user (for VDP1/B-bus matching)
 static bool automation_wp_filter_active = false;  // Conditional watchpoint: only fire on specific value
 static uint32 automation_wp_filter_value = 0;     // Value to match (when filter is active)
 
@@ -859,6 +860,7 @@ void Automation_DisableCPUHook(void)
 
 void Automation_SetWatchpoint(uint32 addr)
 {
+ automation_wp_full_addr = addr;
  automation_wp_addr = addr & 0xFFFFF;  // Mask to Work RAM High offset
  automation_wp_active = true;
  automation_wp_filter_active = false;

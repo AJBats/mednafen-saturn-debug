@@ -886,6 +886,41 @@ static INLINE void BBusRW_DB(uint32 A, uint16* DB, int32* time_thing, int32* dma
    else if(sh2_dma_time_thing != NULL)
     VDP1::Write_CheckDrawSlowdown(A, *sh2_dma_time_thing);
 
+   // Automation: VDP1 write watchpoint
+   if(MDFN_UNLIKELY(automation_wp_active))
+   {
+    // Check if this write overlaps the watched VDP1 address.
+    // VDP1 addresses: 0x05C00000-0x05D7FFFF (also mirrored at 0x25C00000).
+    // Match if the watched address is in VDP1 range and offsets overlap.
+    uint32 wp_full = automation_wp_full_addr;
+    // Normalize mirror: 0x25Cxxxxx -> 0x05Cxxxxx
+    if((wp_full & 0x20000000) && (wp_full & 0x05C00000) == 0x05C00000)
+     wp_full &= ~0x20000000;
+    uint32 a_norm = A;
+    if((a_norm & 0x20000000) && (a_norm & 0x05C00000) == 0x05C00000)
+     a_norm &= ~0x20000000;
+
+    if(wp_full >= 0x05C00000 && wp_full <= 0x05D7FFFF)
+    {
+     uint32 write_off = a_norm & 0x1FFFFF;
+     uint32 wp_off = wp_full & 0x1FFFFF;
+     uint32 write_sz = (sizeof(T) == 1) ? 1 : 2;  // B-bus is 16-bit max
+     if(write_off < wp_off + 4 && write_off + write_sz > wp_off)
+     {
+      uint16 old_val = VDP1::Read16_DB(A);
+      // Do the write, then read new value
+      if(sizeof(T) == 1)
+       VDP1::Write8_DB(A, *DB);
+      else
+       VDP1::Write16_DB(A, *DB);
+      uint16 new_val = VDP1::Read16_DB(A);
+      if(old_val != new_val)
+       ::Automation_WatchpointHit(CPU[0].PC, A, (uint32)old_val, (uint32)new_val, CPU[0].PR, "VDP1");
+      return;  // already wrote
+     }
+    }
+   }
+
    if(sizeof(T) == 1)
     VDP1::Write8_DB(A, *DB);
    else
