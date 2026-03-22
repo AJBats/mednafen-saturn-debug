@@ -469,12 +469,17 @@ async def call_stack(scan_size: int = 1024) -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def breakpoint_set(address: str) -> str:
-    """Set a PC breakpoint. Address in hex (e.g. '0x0600C5D6')."""
+async def breakpoint_set(address: str, log: bool = False) -> str:
+    """Set a PC breakpoint. Address in hex (e.g. '0x0600C5D6').
+    If log=True, logs full context (registers + call stack) to
+    breakpoint_hits.txt without pausing. Use for surveying all callers."""
     if not _alive():
         return "FAIL: No session"
     addr = _strip_hex(address)
-    ack = await _send_and_wait(f"breakpoint {addr}", "ok breakpoint", timeout=5)
+    cmd = f"breakpoint {addr}"
+    if log:
+        cmd += " log"
+    ack = await _send_and_wait(cmd, "ok breakpoint", timeout=5)
     return ack if ack else "FAIL: timed out"
 
 
@@ -521,9 +526,11 @@ async def step(count: int = 1) -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def watchpoint_set(address: str, value: str = "") -> str:
-    """Watch for 4-byte writes to address. Hits logged to watchpoint_hits.txt.
-    Optional: value="0x06037F20" only fires when the new value equals that."""
+async def watchpoint_set(address: str, value: str = "", log: bool = False) -> str:
+    """Watch for 4-byte writes to address. Pauses on hit with full context.
+    Optional: value="0x06037F20" only fires when the new value equals that.
+    Optional: log=True logs full context (registers + call stack) to
+    watchpoint_hits.txt without pausing. Use for surveying all writers."""
     if not _alive():
         return "FAIL: No session"
     addr = _strip_hex(address)
@@ -533,6 +540,8 @@ async def watchpoint_set(address: str, value: str = "") -> str:
     cmd = f"watchpoint {addr}"
     if value:
         cmd += f" eq {_strip_hex(value)}"
+    if log:
+        cmd += " log"
     ack = await _send_and_wait(cmd, "ok watchpoint", timeout=5)
     return ack if ack else "FAIL: timed out"
 
@@ -578,23 +587,29 @@ async def watchpoint_hits() -> str:
 
 
 @mcp.tool()
-async def read_watchpoint_set(address: str) -> str:
-    """Watch for reads from address. Non-pausing -- logs all reader PCs to
-    read_watchpoint_hits.txt. Use to find which functions consume a field.
-    Run for N frames, then read_watchpoint_clear and check the log."""
+async def read_watchpoint_set(address: str, log: bool = False) -> str:
+    """Watch for reads from address. Pauses on hit with full context (PC, PR,
+    registers, call stack) — same behavior as write watchpoints. Also logs all
+    hits to read_watchpoint_hits.txt. Use to find which functions consume a field.
+    frame_advance will return early with 'hit read_watchpoint' when triggered.
+    Optional: log=True logs full context without pausing. Use for surveying
+    all consumers over N frames."""
     if not _alive():
         return "FAIL: No session"
     addr = _strip_hex(address)
     rwp_file = _ipc_path("read_watchpoint_hits.txt")
     if os.path.exists(rwp_file):
         os.remove(rwp_file)
-    ack = await _send_and_wait(f"read_watchpoint {addr}", "ok read_watchpoint", timeout=5)
+    cmd = f"read_watchpoint {addr}"
+    if log:
+        cmd += " log"
+    ack = await _send_and_wait(cmd, "ok read_watchpoint", timeout=5)
     return ack if ack else "FAIL: timed out"
 
 
 @mcp.tool()
 async def read_watchpoint_clear() -> str:
-    """Stop read watchpoint logging."""
+    """Clear read watchpoint and resume if paused on a read watchpoint hit."""
     if not _alive():
         return "FAIL: No session"
     ack = await _send_and_wait("read_watchpoint_clear", "ok read_watchpoint_clear", timeout=5)
@@ -603,7 +618,7 @@ async def read_watchpoint_clear() -> str:
 
 @mcp.tool()
 async def read_watchpoint_hits() -> str:
-    """Read the log from read_watchpoint_set. Summarizes reader PCs."""
+    """Read the accumulated hit log from read_watchpoint_set. Shows all reader PCs."""
     if not _alive():
         return "FAIL: No session"
     rwp_file = _ipc_path("read_watchpoint_hits.txt")

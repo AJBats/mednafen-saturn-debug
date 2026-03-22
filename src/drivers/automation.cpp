@@ -28,7 +28,8 @@
  *   show_window                - Make the emulator window visible (for visual inspection)
  *   hide_window                - Hide the emulator window again
  *   step [N]                   - Step N CPU instructions then pause (default 1)
- *   breakpoint <addr>          - Add PC breakpoint (hex address, deduplicates)
+ *   breakpoint <addr> [log]    - Add PC breakpoint (hex address). "log" = log-only (no pause),
+ *                                 writes full context (regs + call stack) to breakpoint_hits.txt
  *   breakpoint_remove <addr>   - Remove specific PC breakpoint
  *   breakpoint_clear           - Remove all breakpoints
  *   breakpoint_list            - List active breakpoints
@@ -48,9 +49,15 @@
  *   input_playback <path>      - Replay recorded input trace (events injected at correct frames)
  *   input_playback_stop        - Stop input playback
  *   call_stack [scan_size]     - Heuristic SH-2 call stack (scans stack for return addresses)
- *   watchpoint <addr> [eq <val>] - Break on memory write to addr (hex), reports PC+old+new value
+ *   watchpoint <addr> [eq <val>] [log] - Break on memory write to addr (hex), reports PC+old+new value
  *                                 Optional: "eq <val>" only fires when new value == val
+ *                                 Optional: "log" = log-only (no pause), writes full context to watchpoint_hits.txt
  *   watchpoint_clear           - Remove memory watchpoint
+ *   read_watchpoint <addr> [log] - Break on memory read from addr (hex), reports PC+value. Pauses with
+ *                                 full register dump + call stack, same as write watchpoints.
+ *                                 Also logs all hits to read_watchpoint_hits.txt.
+ *                                 Optional: "log" = log-only (no pause), writes full context to log file.
+ *   read_watchpoint_clear      - Remove read watchpoint and resume if paused
  *   vdp2_watchpoint <lo> <hi> <path> - Watch VDP2 address range
  *   vdp2_watchpoint_clear      - Remove VDP2 watchpoint
  *   cdl_start                   - Start Code/Data Logging (clears bitmap, marks code/data per byte)
@@ -182,6 +189,7 @@ static int64_t run_to_cycle_target = -1;  // -1 = not active
 static bool watchpoint_active = false;
 static uint32_t watchpoint_addr = 0;
 static bool watchpoint_paused = false;  // true when paused on watchpoint hit
+static bool watchpoint_log_mode = false; // true = log-only (no pause), false = pause on hit
 static FILE* wp_log = nullptr;          // watchpoint hit log file
 static bool watchpoint_filter_active = false;  // conditional: only fire on specific value
 static uint32_t watchpoint_filter_value = 0;   // value to match (when filter active)
@@ -190,7 +198,12 @@ static uint32_t watchpoint_filter_value = 0;   // value to match (when filter ac
 static bool read_watchpoint_active = false;
 static uint32_t read_watchpoint_addr = 0;
 static bool read_watchpoint_paused = false;
+static bool read_watchpoint_log_mode = false; // true = log-only (no pause)
 static FILE* rwp_log = nullptr;
+
+// Breakpoint logging state
+static bool breakpoint_log_mode = false;  // true = log-only (no pause) for ALL breakpoints
+static FILE* bp_log = nullptr;
 
 // Input trace state -- logs real keyboard input changes with frame numbers
 static FILE* input_trace_file = nullptr;
@@ -643,11 +656,24 @@ static void process_command(const std::string& line)
  else if (cmd == "breakpoint") {
   uint32_t addr = 0;
   iss >> std::hex >> addr;
+  // Check for "log" flag
+  std::string token;
+  if (iss >> token && token == "log") {
+   breakpoint_log_mode = true;
+   if (!bp_log) {
+    std::string path = auto_base_dir + "/breakpoint_hits.txt";
+    bp_log = fopen(path.c_str(), "w");
+    if (bp_log)
+     fprintf(bp_log, "# Breakpoint hit log (log mode)\n");
+   }
+  }
   breakpoints.insert(addr);
   update_cpu_hook();
-  char buf[32];
+  char buf[64];
   snprintf(buf, sizeof(buf), "0x%08X", addr);
-  write_ack(std::string("ok breakpoint ") + buf + " total=" + std::to_string(breakpoints.size()));
+  std::string ack_msg = "ok breakpoint " + std::string(buf) + " total=" + std::to_string(breakpoints.size());
+  if (breakpoint_log_mode) ack_msg += " log";
+  write_ack(ack_msg);
  }
  else if (cmd == "breakpoint_remove") {
   uint32_t addr = 0;
@@ -665,6 +691,8 @@ static void process_command(const std::string& line)
  else if (cmd == "breakpoint_clear") {
   size_t count = breakpoints.size();
   breakpoints.clear();
+  breakpoint_log_mode = false;
+  if (bp_log) { fclose(bp_log); bp_log = nullptr; }
   update_cpu_hook();
   write_ack("ok breakpoint_clear removed=" + std::to_string(count));
  }
@@ -843,22 +871,31 @@ static void process_command(const std::string& line)
   read_watchpoint_paused = false;
   watchpoint_filter_active = false;
   watchpoint_filter_value = 0;
+  watchpoint_log_mode = false;
   // Close stale log from previous watchpoint
   close_wp_log();
   MDFN_IEN_SS::Automation_SetWatchpoint(addr);
-  // Parse optional condition: "watchpoint <addr> eq <value>"
-  std::string condition;
-  if (iss >> condition && condition == "eq") {
-   uint32_t filter_val = 0;
-   iss >> std::hex >> filter_val;
-   watchpoint_filter_active = true;
-   watchpoint_filter_value = filter_val;
-   MDFN_IEN_SS::Automation_SetWatchpointFilter(true, filter_val);
+  // Parse optional flags: "watchpoint <addr> [eq <value>] [log]"
+  std::string token;
+  while (iss >> token) {
+   if (token == "eq") {
+    uint32_t filter_val = 0;
+    iss >> std::hex >> filter_val;
+    watchpoint_filter_active = true;
+    watchpoint_filter_value = filter_val;
+    MDFN_IEN_SS::Automation_SetWatchpointFilter(true, filter_val);
+   } else if (token == "log") {
+    watchpoint_log_mode = true;
+   }
   }
   update_cpu_hook();
   char buf[128];
-  if (watchpoint_filter_active)
+  if (watchpoint_filter_active && watchpoint_log_mode)
+   snprintf(buf, sizeof(buf), "ok watchpoint 0x%08X eq 0x%08X log", addr, watchpoint_filter_value);
+  else if (watchpoint_filter_active)
    snprintf(buf, sizeof(buf), "ok watchpoint 0x%08X eq 0x%08X", addr, watchpoint_filter_value);
+  else if (watchpoint_log_mode)
+   snprintf(buf, sizeof(buf), "ok watchpoint 0x%08X log", addr);
   else
    snprintf(buf, sizeof(buf), "ok watchpoint 0x%08X", addr);
   write_ack(buf);
@@ -894,11 +931,20 @@ static void process_command(const std::string& line)
   iss >> std::hex >> addr;
   read_watchpoint_addr = addr;
   read_watchpoint_active = true;
+  read_watchpoint_log_mode = false;
   // Close stale log
   if (rwp_log) { fclose(rwp_log); rwp_log = nullptr; }
+  // Check for "log" flag
+  std::string token;
+  if (iss >> token && token == "log") {
+   read_watchpoint_log_mode = true;
+  }
   MDFN_IEN_SS::Automation_SetReadWatchpoint(addr);
   char buf[128];
-  snprintf(buf, sizeof(buf), "ok read_watchpoint 0x%08X", addr);
+  if (read_watchpoint_log_mode)
+   snprintf(buf, sizeof(buf), "ok read_watchpoint 0x%08X log", addr);
+  else
+   snprintf(buf, sizeof(buf), "ok read_watchpoint 0x%08X", addr);
   write_ack(buf);
  }
  else if (cmd == "read_watchpoint_clear") {
@@ -1369,24 +1415,31 @@ void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint
   fflush(wp_log);
  }
 
- // Write ack and pause execution.
- // This spin-waits inside the memory bus write path (BusRW_DB_CS3).
- // Safe because Mednafen is single-threaded: both CPUs, DMA, and all
- // peripherals are driven by the same RunLoop_INLINE thread. Nothing
- // else is running while we spin here.
  char msg[256];
  snprintf(msg, sizeof(msg),
   "hit watchpoint pc=0x%08X pr=0x%08X addr=0x%08X old=0x%08X new=0x%08X source=%s frame=%llu",
   pc, pr, addr, old_val, new_val, source, (unsigned long long)frame_counter);
 
- // If run_to_frame or run_to_cycle was active, cancel it and prefix ack
- // so the MCP caller's ack matcher sees completion (with early-stop info).
+ // Log mode: write full context to log file, don't pause
+ if (watchpoint_log_mode) {
+  if (wp_log) {
+   std::string regs = MDFN_IEN_SS::Automation_DumpRegs();
+   std::string stack = MDFN_IEN_SS::Automation_CallStack(0x400);
+   fprintf(wp_log, "--- %s ---\n%s\n%s\n", msg, regs.c_str(), stack.c_str());
+   fflush(wp_log);
+  }
+  return;
+ }
+
+ // Pause mode: write ack and spin-wait.
+ // This spin-waits inside the memory bus write path (BusRW_DB_CS3).
+ // Safe because Mednafen is single-threaded.
  std::string full_msg;
  if (run_to_frame_target >= 0) {
   full_msg = "done run_to_frame frame=" + std::to_string(frame_counter)
            + " STOPPED_BY_WATCHPOINT " + msg;
   run_to_frame_target = -1;
-  frames_to_advance = 0;  // pause
+  frames_to_advance = 0;
  } else if (run_to_cycle_target >= 0) {
   full_msg = "done run_to_cycle STOPPED_BY_WATCHPOINT " + std::string(msg);
   run_to_cycle_target = -1;
@@ -1395,7 +1448,6 @@ void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint
   full_msg = msg;
  }
 
- // Auto-context: append registers + call stack
  full_msg += "\n" + MDFN_IEN_SS::Automation_DumpRegs();
  full_msg += "\n" + MDFN_IEN_SS::Automation_CallStack(0x400);
  write_ack(full_msg);
@@ -1417,24 +1469,36 @@ void Automation_ReadWatchpointHit(uint32_t pc, uint32_t addr, uint32_t val, uint
  if (!read_watchpoint_active || !automation_active)
   return;
 
- // Log hit to file
+ // Log hit to file (always, both modes)
  if (!rwp_log) {
   std::string path = auto_base_dir + "/read_watchpoint_hits.txt";
   rwp_log = fopen(path.c_str(), "w");
   if (rwp_log)
    fprintf(rwp_log, "# Read watchpoint hits for addr 0x%08X\n", read_watchpoint_addr);
  }
+
+ char msg[256];
+ snprintf(msg, sizeof(msg),
+  "hit read_watchpoint pc=0x%08X pr=0x%08X addr=0x%08X val=0x%08X frame=%llu",
+  pc, pr, addr, val, (unsigned long long)frame_counter);
+
+ // Log mode: write full context to log file, don't pause
+ if (read_watchpoint_log_mode) {
+  if (rwp_log) {
+   std::string regs = MDFN_IEN_SS::Automation_DumpRegs();
+   std::string stack = MDFN_IEN_SS::Automation_CallStack(0x400);
+   fprintf(rwp_log, "--- %s ---\n%s\n%s\n", msg, regs.c_str(), stack.c_str());
+   fflush(rwp_log);
+  }
+  return;
+ }
+
+ // Pause mode: log summary line then ack + spin-wait
  if (rwp_log) {
   fprintf(rwp_log, "pc=0x%08X pr=0x%08X addr=0x%08X val=0x%08X frame=%llu\n",
    pc, pr, addr, val, (unsigned long long)frame_counter);
   fflush(rwp_log);
  }
-
- // Ack with context and pause — same pattern as write watchpoints
- char msg[256];
- snprintf(msg, sizeof(msg),
-  "hit read_watchpoint pc=0x%08X pr=0x%08X addr=0x%08X val=0x%08X frame=%llu",
-  pc, pr, addr, val, (unsigned long long)frame_counter);
 
  std::string full_msg;
  if (run_to_frame_target >= 0) {
@@ -1501,6 +1565,26 @@ bool Automation_DebugHook(uint32_t pc)
  bool should_pause = bp_hit || cycle_hit || (instructions_to_step == 0);
  if (!should_pause)
   return false;
+
+ // Breakpoint log mode: log full context to file, don't pause
+ if (bp_hit && breakpoint_log_mode) {
+  if (!bp_log) {
+   std::string path = auto_base_dir + "/breakpoint_hits.txt";
+   bp_log = fopen(path.c_str(), "w");
+   if (bp_log)
+    fprintf(bp_log, "# Breakpoint hit log (log mode)\n");
+  }
+  if (bp_log) {
+   std::string regs = MDFN_IEN_SS::Automation_DumpRegs();
+   std::string stack = MDFN_IEN_SS::Automation_CallStack(0x400);
+   fprintf(bp_log, "--- break pc=0x%08X addr=0x%08X frame=%llu ---\n%s\n%s\n",
+    pc, bp_addr, (unsigned long long)frame_counter, regs.c_str(), stack.c_str());
+   fflush(bp_log);
+  }
+  // If ONLY a breakpoint hit (not also cycle/step), don't pause
+  if (!cycle_hit && instructions_to_step != 0)
+   return false;
+ }
 
  // Pause at instruction level
  instruction_paused = true;
