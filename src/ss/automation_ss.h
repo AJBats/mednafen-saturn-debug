@@ -46,13 +46,18 @@ namespace MDFN_IEN_SS {
  void Automation_SetCallTraceFile(FILE* f);
  void Automation_ClearCallTraceFile(void);
 
- // Memory watchpoints
+ // Memory write watchpoints
  void Automation_SetWatchpoint(uint32 addr);
  void Automation_SetWatchpointFilter(bool active, uint32 value);
  void Automation_ClearWatchpoint(void);
  bool Automation_CheckWatchpointActive(void);
  void Automation_SetVDP2Watchpoint(uint32 lo, uint32 hi, const char* logpath);
  void Automation_ClearVDP2Watchpoint(void);
+
+ // Memory read watchpoints (non-pausing, log-only)
+ void Automation_SetReadWatchpoint(uint32 addr);
+ void Automation_ClearReadWatchpoint(void);
+ bool Automation_CheckReadWatchpointActive(void);
 
  // CD Block tracing
  void CDB_EnableSCDQTrace(const char* path);

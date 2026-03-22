@@ -216,10 +216,10 @@ async def frame_advance(count: int = 1) -> str:
     if not _alive():
         return "FAIL: No session"
     ack = await _send_and_wait(f"frame_advance {count}",
-                               ["done frame_advance", "hit watchpoint", "break pc="],
+                               ["done frame_advance", "hit watchpoint", "hit read_watchpoint", "break pc="],
                                timeout=180)
     if ack:
-        if "hit watchpoint" in ack:
+        if "hit watchpoint" in ack or "hit read_watchpoint" in ack:
             return ack
         if "break pc=" in ack:
             return f"BREAK: {ack}"
@@ -571,6 +571,61 @@ async def watchpoint_hits() -> str:
     summary = f"Total hits: {len(hits)}\n\nWriter PCs:\n"
     for pc, count in sorted(pcs.items(), key=lambda x: -x[1]):
         summary += f"  {pc}: {count} writes\n"
+    summary += f"\nFirst {min(len(samples), 20)} hits:\n"
+    for line in samples:
+        summary += f"  {line}\n"
+    return summary
+
+
+@mcp.tool()
+async def read_watchpoint_set(address: str) -> str:
+    """Watch for reads from address. Non-pausing -- logs all reader PCs to
+    read_watchpoint_hits.txt. Use to find which functions consume a field.
+    Run for N frames, then read_watchpoint_clear and check the log."""
+    if not _alive():
+        return "FAIL: No session"
+    addr = _strip_hex(address)
+    rwp_file = _ipc_path("read_watchpoint_hits.txt")
+    if os.path.exists(rwp_file):
+        os.remove(rwp_file)
+    ack = await _send_and_wait(f"read_watchpoint {addr}", "ok read_watchpoint", timeout=5)
+    return ack if ack else "FAIL: timed out"
+
+
+@mcp.tool()
+async def read_watchpoint_clear() -> str:
+    """Stop read watchpoint logging."""
+    if not _alive():
+        return "FAIL: No session"
+    ack = await _send_and_wait("read_watchpoint_clear", "ok read_watchpoint_clear", timeout=5)
+    return ack if ack else "FAIL: timed out"
+
+
+@mcp.tool()
+async def read_watchpoint_hits() -> str:
+    """Read the log from read_watchpoint_set. Summarizes reader PCs."""
+    if not _alive():
+        return "FAIL: No session"
+    rwp_file = _ipc_path("read_watchpoint_hits.txt")
+    if not os.path.exists(rwp_file):
+        return "No read watchpoint hits recorded."
+    with open(rwp_file) as f:
+        lines = f.readlines()
+    hits = [l.strip() for l in lines if "pc=" in l]
+    if not hits:
+        return "No read watchpoint hits recorded."
+    pcs = {}
+    samples = []
+    for line in hits:
+        for token in line.split():
+            if token.startswith("pc="):
+                pc = token.split("=", 1)[1]
+                pcs[pc] = pcs.get(pc, 0) + 1
+        if len(samples) < 20:
+            samples.append(line)
+    summary = f"Total read hits: {len(hits)}\n\nReader PCs:\n"
+    for pc, count in sorted(pcs.items(), key=lambda x: -x[1]):
+        summary += f"  {pc}: {count} reads\n"
     summary += f"\nFirst {min(len(samples), 20)} hits:\n"
     for line in samples:
         summary += f"  {line}\n"

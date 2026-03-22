@@ -57,6 +57,7 @@ using namespace Mednafen;
 // Forward declarations -- defined in drivers/automation.cpp (global namespace)
 bool Automation_DebugHook(uint32_t pc);
 void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint32_t new_val, uint32_t pr, const char* source);
+void Automation_ReadWatchpointHit(uint32_t pc, uint32_t addr, uint32_t val, uint32_t pr);
 
 namespace MDFN_IEN_SS
 {
@@ -161,6 +162,12 @@ static uint32 automation_wp_addr = 0;       // Work RAM High offset (masked to 0
 static uint32 automation_wp_full_addr = 0;  // Full address as provided by user (for VDP1/B-bus matching)
 static bool automation_wp_filter_active = false;  // Conditional watchpoint: only fire on specific value
 static uint32 automation_wp_filter_value = 0;     // Value to match (when filter is active)
+
+// Automation: memory READ watchpoint state.
+// Same behavior as write watchpoints — pauses on hit, reports context.
+static bool automation_rwp_active = false;
+static uint32 automation_rwp_addr = 0;      // Work RAM High offset (masked to 0xFFFFF)
+static bool automation_rwp_paused = false;   // true when paused on read watchpoint hit
 
 // Automation: VDP2 VRAM write watchpoint (logs ALL writes in an address range)
 static bool automation_vdp2wp_active = false;
@@ -449,6 +456,20 @@ static INLINE void BusRW_DB_CS3(const uint32 A, uint32& DB, const bool BurstHax,
   uint32 wp_new = ne16_rbo_be<uint32>(WorkRAMH, automation_wp_addr & 0xFFFFC);
   if(wp_new != wp_old && (!automation_wp_filter_active || wp_new == automation_wp_filter_value))
    ::Automation_WatchpointHit(CPU[0].PC, A, wp_old, wp_new, CPU[0].PR, "CPU");
+ }
+
+ // Automation: read watchpoint — detect reads that overlap watched address
+ if(!IsWrite && MDFN_UNLIKELY(automation_rwp_active))
+ {
+  uint32 read_start = A & 0xFFFFF;
+  uint32 read_end = read_start + sizeof(T);
+  uint32 rwp_start = automation_rwp_addr;
+  uint32 rwp_end = rwp_start + 4;
+  if(read_start < rwp_end && read_end > rwp_start)
+  {
+   uint32 val = ne16_rbo_be<uint32>(WorkRAMH, automation_rwp_addr & 0xFFFFC);
+   ::Automation_ReadWatchpointHit(CPU[0].PC, A, val, CPU[0].PR);
+  }
  }
 }
 
@@ -878,6 +899,22 @@ void Automation_SetWatchpointFilter(bool active, uint32 value)
 {
  automation_wp_filter_active = active;
  automation_wp_filter_value = value;
+}
+
+void Automation_SetReadWatchpoint(uint32 addr)
+{
+ automation_rwp_addr = addr & 0xFFFFF;
+ automation_rwp_active = true;
+}
+
+void Automation_ClearReadWatchpoint(void)
+{
+ automation_rwp_active = false;
+}
+
+bool Automation_CheckReadWatchpointActive(void)
+{
+ return automation_rwp_active;
 }
 
 bool Automation_CheckWatchpointActive(void)

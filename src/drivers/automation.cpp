@@ -186,6 +186,12 @@ static FILE* wp_log = nullptr;          // watchpoint hit log file
 static bool watchpoint_filter_active = false;  // conditional: only fire on specific value
 static uint32_t watchpoint_filter_value = 0;   // value to match (when filter active)
 
+// Read watchpoint state — same pattern as write watchpoints
+static bool read_watchpoint_active = false;
+static uint32_t read_watchpoint_addr = 0;
+static bool read_watchpoint_paused = false;
+static FILE* rwp_log = nullptr;
+
 // Input trace state -- logs real keyboard input changes with frame numbers
 static FILE* input_trace_file = nullptr;
 static uint16_t last_traced_input = 0;
@@ -346,6 +352,7 @@ static void process_command(const std::string& line)
   frames_to_advance = n;
   instruction_paused = false;   // unblock instruction-level pause
   watchpoint_paused = false;    // unblock watchpoint pause
+  read_watchpoint_paused = false;
   instructions_to_step = -1;    // cancel step mode
   run_to_cycle_target = -1;     // cancel cycle target
   update_cpu_hook();
@@ -397,6 +404,7 @@ static void process_command(const std::string& line)
   frames_to_advance = -1;  // free-run until target
   instruction_paused = false;
   watchpoint_paused = false;
+  read_watchpoint_paused = false;
   instructions_to_step = -1;
   run_to_cycle_target = -1;
   update_cpu_hook();
@@ -407,6 +415,7 @@ static void process_command(const std::string& line)
   run_to_frame_target = -1;
   instruction_paused = false;
   watchpoint_paused = false;
+  read_watchpoint_paused = false;
   instructions_to_step = -1;
   run_to_cycle_target = -1;
   update_cpu_hook();
@@ -610,6 +619,7 @@ static void process_command(const std::string& line)
     frames_to_advance = 1;
     instruction_paused = false;   // unblock instruction-level pause
     watchpoint_paused = false;    // unblock watchpoint pause
+  read_watchpoint_paused = false;
     instructions_to_step = -1;    // cancel step mode
     run_to_cycle_target = -1;     // cancel cycle target
     update_cpu_hook();
@@ -830,6 +840,7 @@ static void process_command(const std::string& line)
   watchpoint_addr = addr;
   watchpoint_active = true;
   watchpoint_paused = false;
+  read_watchpoint_paused = false;
   watchpoint_filter_active = false;
   watchpoint_filter_value = 0;
   // Close stale log from previous watchpoint
@@ -855,6 +866,7 @@ static void process_command(const std::string& line)
  else if (cmd == "watchpoint_clear") {
   watchpoint_active = false;
   watchpoint_paused = false;
+  read_watchpoint_paused = false;
   close_wp_log();
   MDFN_IEN_SS::Automation_ClearWatchpoint();
   update_cpu_hook();
@@ -876,6 +888,25 @@ static void process_command(const std::string& line)
  else if (cmd == "vdp2_watchpoint_clear") {
   MDFN_IEN_SS::Automation_ClearVDP2Watchpoint();
   write_ack("ok vdp2_watchpoint_clear");
+ }
+ else if (cmd == "read_watchpoint") {
+  uint32_t addr = 0;
+  iss >> std::hex >> addr;
+  read_watchpoint_addr = addr;
+  read_watchpoint_active = true;
+  // Close stale log
+  if (rwp_log) { fclose(rwp_log); rwp_log = nullptr; }
+  MDFN_IEN_SS::Automation_SetReadWatchpoint(addr);
+  char buf[128];
+  snprintf(buf, sizeof(buf), "ok read_watchpoint 0x%08X", addr);
+  write_ack(buf);
+ }
+ else if (cmd == "read_watchpoint_clear") {
+  read_watchpoint_active = false;
+  read_watchpoint_paused = false;
+  if (rwp_log) { fclose(rwp_log); rwp_log = nullptr; }
+  MDFN_IEN_SS::Automation_ClearReadWatchpoint();
+  write_ack("ok read_watchpoint_clear");
  }
  else if (cmd == "deterministic") {
   MDFN_IEN_SS::Automation_SetDeterministic();
@@ -928,6 +959,7 @@ static void process_command(const std::string& line)
   run_to_cycle_target = n;
   instruction_paused = false;
   watchpoint_paused = false;
+  read_watchpoint_paused = false;
   instructions_to_step = -1;
   if (frames_to_advance == 0)
    frames_to_advance = -1;
@@ -1015,6 +1047,7 @@ static void process_command(const std::string& line)
     frames_to_advance = -1;
     instruction_paused = false;
     watchpoint_paused = false;
+    read_watchpoint_paused = false;
     instructions_to_step = -1;
     run_to_cycle_target = -1;
     update_cpu_hook();
@@ -1369,6 +1402,60 @@ void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint
 
  watchpoint_paused = true;
  while (watchpoint_paused && automation_active) {
+#ifdef WIN32
+  Sleep(10);
+#else
+  struct timespec ts = {0, 10000000}; // 10ms
+  nanosleep(&ts, NULL);
+#endif
+  check_action_file();
+ }
+}
+
+void Automation_ReadWatchpointHit(uint32_t pc, uint32_t addr, uint32_t val, uint32_t pr)
+{
+ if (!read_watchpoint_active || !automation_active)
+  return;
+
+ // Log hit to file
+ if (!rwp_log) {
+  std::string path = auto_base_dir + "/read_watchpoint_hits.txt";
+  rwp_log = fopen(path.c_str(), "w");
+  if (rwp_log)
+   fprintf(rwp_log, "# Read watchpoint hits for addr 0x%08X\n", read_watchpoint_addr);
+ }
+ if (rwp_log) {
+  fprintf(rwp_log, "pc=0x%08X pr=0x%08X addr=0x%08X val=0x%08X frame=%llu\n",
+   pc, pr, addr, val, (unsigned long long)frame_counter);
+  fflush(rwp_log);
+ }
+
+ // Ack with context and pause — same pattern as write watchpoints
+ char msg[256];
+ snprintf(msg, sizeof(msg),
+  "hit read_watchpoint pc=0x%08X pr=0x%08X addr=0x%08X val=0x%08X frame=%llu",
+  pc, pr, addr, val, (unsigned long long)frame_counter);
+
+ std::string full_msg;
+ if (run_to_frame_target >= 0) {
+  full_msg = "done run_to_frame frame=" + std::to_string(frame_counter)
+           + " STOPPED_BY_READ_WATCHPOINT " + msg;
+  run_to_frame_target = -1;
+  frames_to_advance = 0;
+ } else if (run_to_cycle_target >= 0) {
+  full_msg = "done run_to_cycle STOPPED_BY_READ_WATCHPOINT " + std::string(msg);
+  run_to_cycle_target = -1;
+  frames_to_advance = 0;
+ } else {
+  full_msg = msg;
+ }
+
+ full_msg += "\n" + MDFN_IEN_SS::Automation_DumpRegs();
+ full_msg += "\n" + MDFN_IEN_SS::Automation_CallStack(0x400);
+ write_ack(full_msg);
+
+ read_watchpoint_paused = true;
+ while (read_watchpoint_paused && automation_active) {
 #ifdef WIN32
   Sleep(10);
 #else
