@@ -53,6 +53,7 @@ _seq = 0
 _frame = 0
 _ipc_dir = None
 _default_cue = None
+_home_dir = None
 
 # Cheat-engine memory snapshots (name -> bytes)
 _memory_snapshots = {}
@@ -153,8 +154,9 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
     script_dir = os.path.dirname(os.path.abspath(__file__))
     med_bin = os.path.join(script_dir, "src", "mednafen.exe")
 
-    # Project-local MEDNAFEN_HOME so multiple instances can run side-by-side
-    med_home = os.environ.get("MEDNAFEN_HOME") or os.path.join(script_dir, "home")
+    # Project-local MEDNAFEN_HOME so multiple instances can run side-by-side.
+    # Priority: --home-dir flag > MEDNAFEN_HOME env var > script_dir/home default
+    med_home = _home_dir or os.environ.get("MEDNAFEN_HOME") or os.path.join(script_dir, "home")
     os.makedirs(med_home, exist_ok=True)
 
     # Remove stale lockfile
@@ -1485,13 +1487,16 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cue", default=None)
     parser.add_argument("--ipc-dir", default=None)
+    parser.add_argument("--home-dir", default=None)
     args = parser.parse_args()
 
-    global _default_cue, _ipc_dir
+    global _default_cue, _ipc_dir, _home_dir
     if args.cue:
         _default_cue = args.cue
     if args.ipc_dir:
         _ipc_dir = args.ipc_dir
+    if args.home_dir:
+        _home_dir = args.home_dir
 
     mcp.run()
 
