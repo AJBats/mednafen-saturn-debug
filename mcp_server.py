@@ -216,11 +216,13 @@ async def frame_advance(count: int = 1) -> str:
     if not _alive():
         return "FAIL: No session"
     ack = await _send_and_wait(f"frame_advance {count}",
-                               ["done frame_advance", "hit watchpoint", "hit read_watchpoint", "break pc="],
+                               ["done frame_advance", "hit watchpoint", "hit read_watchpoint", "break pc=", "hit exception"],
                                timeout=180)
     if ack:
         if "hit watchpoint" in ack or "hit read_watchpoint" in ack:
             return ack
+        if "hit exception" in ack:
+            return f"EXCEPTION: {ack}"
         if "break pc=" in ack:
             return f"BREAK: {ack}"
         # Parse real frame from automation ack (e.g. "done frame_advance frame=123")
@@ -517,7 +519,10 @@ async def step(count: int = 1) -> str:
     if not _alive():
         return "FAIL: No session"
     ack = await _send_and_wait(f"step {count}",
-                               ["done step", "hit watchpoint"], timeout=30)
+                               ["done step", "hit watchpoint", "hit read_watchpoint", "hit exception"],
+                               timeout=30)
+    if ack and "hit exception" in ack:
+        return f"EXCEPTION: {ack}"
     return ack if ack else "FAIL: step timed out"
 
 
@@ -645,6 +650,25 @@ async def read_watchpoint_hits() -> str:
     for line in samples:
         summary += f"  {line}\n"
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Exception handling
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def exception_break(mode: str = "enable") -> str:
+    """Control SH-2 exception reporting. Modes:
+    'enable' = pause on exception with full context (like breakpoints).
+    'log' = log exceptions to exception_hits.txt without pausing.
+    'disable' = default, let BIOS handle exceptions silently.
+    Catches: address errors, illegal instructions, slot illegal, NMI."""
+    if not _alive():
+        return "FAIL: No session"
+    if mode not in ("enable", "log", "disable"):
+        return "FAIL: mode must be enable, log, or disable"
+    ack = await _send_and_wait(f"exception_break {mode}", "ok exception_break", timeout=5)
+    return ack if ack else "FAIL: timed out"
 
 
 # ---------------------------------------------------------------------------
@@ -1030,16 +1054,17 @@ async def run_to_frame(frame: int) -> str:
     if not _alive():
         return "FAIL: No session"
     ack = await _send_and_wait(f"run_to_frame {frame}",
-                               ["done run_to_frame", "hit watchpoint"],
+                               ["done run_to_frame", "hit watchpoint", "hit read_watchpoint", "hit exception"],
                                timeout=300)
     if ack:
-        # Parse actual frame from ack (may differ from target if stopped early)
         import re
         m = re.search(r"frame=(\d+)", ack)
         if m:
             _frame = int(m.group(1))
-        if "STOPPED_BY_WATCHPOINT" in ack or "hit watchpoint" in ack:
+        if "STOPPED_BY_WATCHPOINT" in ack or "hit watchpoint" in ack or "hit read_watchpoint" in ack:
             return f"STOPPED at frame {_frame} by watchpoint (target was {frame}):\n{ack}"
+        if "STOPPED_BY_EXCEPTION" in ack or "hit exception" in ack:
+            return f"EXCEPTION at frame {_frame} (target was {frame}):\n{ack}"
         _frame = frame
         return f"OK: At frame {frame}"
     return "FAIL: run_to_frame timed out"
@@ -1054,7 +1079,9 @@ async def run_free(wait_for_break: bool = False, timeout: int = 300) -> str:
     _send("run")  # No ack from C++ -- single-threaded, guaranteed to execute
     if not wait_for_break:
         return "ok run"
-    ack = await _wait_ack(["break ", "hit watchpoint"], timeout=timeout)
+    ack = await _wait_ack(["break ", "hit watchpoint", "hit read_watchpoint", "hit exception"], timeout=timeout)
+    if ack and "hit exception" in ack:
+        return f"EXCEPTION: {ack}"
     return ack if ack else f"TIMEOUT: no break event within {timeout}s"
 
 
@@ -1091,11 +1118,13 @@ async def run_to_cycle(cycle: int) -> str:
     if not _alive():
         return "FAIL: No session"
     ack = await _send_and_wait(f"run_to_cycle {cycle}",
-                               ["done run_to_cycle", "hit watchpoint"],
+                               ["done run_to_cycle", "hit watchpoint", "hit read_watchpoint", "hit exception"],
                                timeout=60)
     if ack:
-        if "STOPPED_BY_WATCHPOINT" in ack or "hit watchpoint" in ack:
+        if "STOPPED_BY_WATCHPOINT" in ack or "hit watchpoint" in ack or "hit read_watchpoint" in ack:
             return f"STOPPED by watchpoint (target cycle was {cycle}):\n{ack}"
+        if "STOPPED_BY_EXCEPTION" in ack or "hit exception" in ack:
+            return f"EXCEPTION (target cycle was {cycle}):\n{ack}"
         return ack
     return "FAIL: timed out"
 

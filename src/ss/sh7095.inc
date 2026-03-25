@@ -3427,6 +3427,8 @@ static const uint8 InstrDecodeTab[65536] =
  if((unsigned)(exnum) != 9) /* skip regular interrupts */ \
   fprintf(stderr, "[SH2-EXCEPTION] %s: -> handler at 0x%08x (saved PC=0x%08x on stack at R15=0x%08x)\n", \
          cpu_name, (unsigned)(new_PC), PC, R[15]); \
+ if((unsigned)(exnum) != 9) /* notify automation of non-interrupt exceptions */ \
+  MDFN_IEN_SS::Automation_ExceptionHit((unsigned)(exnum), (unsigned)(vecnum), PC, SR, R[15], PR, VBR, new_PC); \
  if(DebugMode)								\
   DBG_AddBranchTrace(this - CPU, new_PC, (exnum), (vecnum));		\
 									\

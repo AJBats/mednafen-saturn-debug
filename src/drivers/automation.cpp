@@ -58,6 +58,9 @@
  *                                 Also logs all hits to read_watchpoint_hits.txt.
  *                                 Optional: "log" = log-only (no pause), writes full context to log file.
  *   read_watchpoint_clear      - Remove read watchpoint and resume if paused
+ *   exception_break <mode>    - Control SH-2 exception reporting (enable=pause, log=log-only, disable=off)
+ *                               Catches: address errors, illegal instructions, slot illegal, NMI.
+ *                               Reports type, PC, SR, VBR, handler address + full register dump + call stack.
  *   vdp2_watchpoint <lo> <hi> <path> - Watch VDP2 address range
  *   vdp2_watchpoint_clear      - Remove VDP2 watchpoint
  *   cdl_start                   - Start Code/Data Logging (clears bitmap, marks code/data per byte)
@@ -200,6 +203,14 @@ static uint32_t read_watchpoint_addr = 0;
 static bool read_watchpoint_paused = false;
 static bool read_watchpoint_log_mode = false; // true = log-only (no pause)
 static FILE* rwp_log = nullptr;
+
+// Exception break state
+// "enable" = pause on exception (like breakpoints)
+// "log"    = log to file without pausing
+// "disable" = let BIOS handle it (default)
+static enum { EXC_DISABLE, EXC_ENABLE, EXC_LOG } exception_mode = EXC_DISABLE;
+static bool exception_paused = false;
+static FILE* exc_log = nullptr;
 
 // Breakpoint logging state
 static bool breakpoint_log_mode = false;  // true = log-only (no pause) for ALL breakpoints
@@ -366,6 +377,7 @@ static void process_command(const std::string& line)
   instruction_paused = false;   // unblock instruction-level pause
   watchpoint_paused = false;    // unblock watchpoint pause
   read_watchpoint_paused = false;
+  exception_paused = false;
   instructions_to_step = -1;    // cancel step mode
   run_to_cycle_target = -1;     // cancel cycle target
   update_cpu_hook();
@@ -418,6 +430,7 @@ static void process_command(const std::string& line)
   instruction_paused = false;
   watchpoint_paused = false;
   read_watchpoint_paused = false;
+  exception_paused = false;
   instructions_to_step = -1;
   run_to_cycle_target = -1;
   update_cpu_hook();
@@ -429,6 +442,7 @@ static void process_command(const std::string& line)
   instruction_paused = false;
   watchpoint_paused = false;
   read_watchpoint_paused = false;
+  exception_paused = false;
   instructions_to_step = -1;
   run_to_cycle_target = -1;
   update_cpu_hook();
@@ -633,6 +647,7 @@ static void process_command(const std::string& line)
     instruction_paused = false;   // unblock instruction-level pause
     watchpoint_paused = false;    // unblock watchpoint pause
   read_watchpoint_paused = false;
+  exception_paused = false;
     instructions_to_step = -1;    // cancel step mode
     run_to_cycle_target = -1;     // cancel cycle target
     update_cpu_hook();
@@ -647,6 +662,8 @@ static void process_command(const std::string& line)
   instructions_to_step = n;
   instruction_paused = false;  // unblock instruction-level pause if active
   watchpoint_paused = false;   // unblock watchpoint pause
+  read_watchpoint_paused = false;
+  exception_paused = false;
   // Unblock frame-level pause -- the CPU hook will pause us after N instructions
   if (frames_to_advance == 0)
    frames_to_advance = -1;
@@ -869,6 +886,7 @@ static void process_command(const std::string& line)
   watchpoint_active = true;
   watchpoint_paused = false;
   read_watchpoint_paused = false;
+  exception_paused = false;
   watchpoint_filter_active = false;
   watchpoint_filter_value = 0;
   watchpoint_log_mode = false;
@@ -904,6 +922,7 @@ static void process_command(const std::string& line)
   watchpoint_active = false;
   watchpoint_paused = false;
   read_watchpoint_paused = false;
+  exception_paused = false;
   close_wp_log();
   MDFN_IEN_SS::Automation_ClearWatchpoint();
   update_cpu_hook();
@@ -950,6 +969,7 @@ static void process_command(const std::string& line)
  else if (cmd == "read_watchpoint_clear") {
   read_watchpoint_active = false;
   read_watchpoint_paused = false;
+  exception_paused = false;
   if (rwp_log) { fclose(rwp_log); rwp_log = nullptr; }
   MDFN_IEN_SS::Automation_ClearReadWatchpoint();
   write_ack("ok read_watchpoint_clear");
@@ -957,6 +977,29 @@ static void process_command(const std::string& line)
  else if (cmd == "deterministic") {
   MDFN_IEN_SS::Automation_SetDeterministic();
   write_ack("ok deterministic");
+ }
+ else if (cmd == "exception_break") {
+  std::string mode;
+  iss >> mode;
+  if (mode == "enable") {
+   exception_mode = EXC_ENABLE;
+   write_ack("ok exception_break enable");
+  } else if (mode == "log") {
+   exception_mode = EXC_LOG;
+   if (!exc_log) {
+    std::string path = auto_base_dir + "/exception_hits.txt";
+    exc_log = fopen(path.c_str(), "w");
+    if (exc_log) fprintf(exc_log, "# SH-2 exception log\n");
+   }
+   write_ack("ok exception_break log");
+  } else if (mode == "disable") {
+   exception_mode = EXC_DISABLE;
+   exception_paused = false;
+   if (exc_log) { fclose(exc_log); exc_log = nullptr; }
+   write_ack("ok exception_break disable");
+  } else {
+   write_ack("error exception_break: usage: exception_break <enable|log|disable>");
+  }
  }
  else if (cmd == "insn_trace") {
   std::string path;
@@ -1006,6 +1049,7 @@ static void process_command(const std::string& line)
   instruction_paused = false;
   watchpoint_paused = false;
   read_watchpoint_paused = false;
+  exception_paused = false;
   instructions_to_step = -1;
   if (frames_to_advance == 0)
    frames_to_advance = -1;
@@ -1094,6 +1138,7 @@ static void process_command(const std::string& line)
     instruction_paused = false;
     watchpoint_paused = false;
     read_watchpoint_paused = false;
+    exception_paused = false;
     instructions_to_step = -1;
     run_to_cycle_target = -1;
     update_cpu_hook();
@@ -1313,6 +1358,9 @@ void Automation_Kill(void)
   write_ack("shutdown frame=" + std::to_string(frame_counter));
   automation_active = false;
   close_wp_log();
+  if (rwp_log) { fclose(rwp_log); rwp_log = nullptr; }
+  if (bp_log) { fclose(bp_log); bp_log = nullptr; }
+  if (exc_log) { fclose(exc_log); exc_log = nullptr; }
   delete[] cached_fb_pixels;  cached_fb_pixels = nullptr;
   delete[] cached_fb_lw;      cached_fb_lw = nullptr;
   cached_fb_valid = false;
@@ -1520,6 +1568,86 @@ void Automation_ReadWatchpointHit(uint32_t pc, uint32_t addr, uint32_t val, uint
 
  read_watchpoint_paused = true;
  while (read_watchpoint_paused && automation_active) {
+#ifdef WIN32
+  Sleep(10);
+#else
+  struct timespec ts = {0, 10000000}; // 10ms
+  nanosleep(&ts, NULL);
+#endif
+  check_action_file();
+ }
+}
+
+static const char* exception_name(unsigned exnum)
+{
+ switch (exnum) {
+  case 2: return "illegal_instruction";
+  case 3: return "slot_illegal";
+  case 4: return "cpu_address_error";
+  case 5: return "dma_address_error";
+  case 6: return "nmi";
+  case 7: return "user_break";
+  case 8: return "trap";
+  default: return "unknown";
+ }
+}
+
+void Automation_ExceptionHit(unsigned exnum, unsigned vecnum, uint32_t pc, uint32_t sr,
+                              uint32_t r15, uint32_t pr, uint32_t vbr, uint32_t handler_pc)
+{
+ if (!automation_active || exception_mode == EXC_DISABLE)
+  return;
+
+ // Don't report if already paused on another event (e.g., watchpoint hit
+ // on the stack push inside the Exception macro itself)
+ if (watchpoint_paused || read_watchpoint_paused || exception_paused)
+  return;
+
+ char msg[512];
+ snprintf(msg, sizeof(msg),
+  "hit exception type=%s exnum=%u vecnum=0x%02X pc=0x%08X sr=0x%08X "
+  "r15=0x%08X pr=0x%08X vbr=0x%08X handler=0x%08X frame=%llu",
+  exception_name(exnum), exnum, vecnum, pc, sr, r15, pr, vbr, handler_pc,
+  (unsigned long long)frame_counter);
+
+ if (exception_mode == EXC_LOG) {
+  // Log mode: write full context to file, don't pause
+  if (!exc_log) {
+   std::string path = auto_base_dir + "/exception_hits.txt";
+   exc_log = fopen(path.c_str(), "w");
+   if (exc_log) fprintf(exc_log, "# SH-2 exception log\n");
+  }
+  if (exc_log) {
+   std::string regs = MDFN_IEN_SS::Automation_DumpRegs();
+   std::string stack = MDFN_IEN_SS::Automation_CallStack(0x400);
+   fprintf(exc_log, "--- %s ---\n%s\n%s\n", msg, regs.c_str(), stack.c_str());
+   fflush(exc_log);
+  }
+  return;
+ }
+
+ // Enable mode: ack with context and pause
+ std::string full_msg;
+ if (run_to_frame_target >= 0) {
+  full_msg = "done run_to_frame frame=" + std::to_string(frame_counter)
+           + " STOPPED_BY_EXCEPTION " + msg;
+  run_to_frame_target = -1;
+  frames_to_advance = 0;
+ } else if (run_to_cycle_target >= 0) {
+  full_msg = "done run_to_cycle STOPPED_BY_EXCEPTION " + std::string(msg);
+  run_to_cycle_target = -1;
+  frames_to_advance = 0;
+ } else {
+  full_msg = msg;
+  frames_to_advance = 0;
+ }
+
+ full_msg += "\n" + MDFN_IEN_SS::Automation_DumpRegs();
+ full_msg += "\n" + MDFN_IEN_SS::Automation_CallStack(0x400);
+ write_ack(full_msg);
+
+ exception_paused = true;
+ while (exception_paused && automation_active) {
 #ifdef WIN32
   Sleep(10);
 #else

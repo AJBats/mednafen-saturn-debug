@@ -58,6 +58,7 @@ using namespace Mednafen;
 bool Automation_DebugHook(uint32_t pc);
 void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint32_t new_val, uint32_t pr, const char* source);
 void Automation_ReadWatchpointHit(uint32_t pc, uint32_t addr, uint32_t val, uint32_t pr);
+void Automation_ExceptionHit(unsigned exnum, unsigned vecnum, uint32_t pc, uint32_t sr, uint32_t r15, uint32_t pr, uint32_t vbr, uint32_t handler_pc);
 
 namespace MDFN_IEN_SS
 {
@@ -1161,6 +1162,13 @@ void Automation_DisableInsnTrace(void)
 }
 
 // Automation: enable deterministic mode.
+// Bridge: called from SH-2 Exception() macro (inside MDFN_IEN_SS namespace),
+// forwards to the global ::Automation_ExceptionHit() in automation.cpp.
+void Automation_ExceptionHit(unsigned exnum, unsigned vecnum, uint32 pc, uint32 sr, uint32 r15, uint32 pr, uint32 vbr, uint32 handler_pc)
+{
+ ::Automation_ExceptionHit(exnum, vecnum, pc, sr, r15, pr, vbr, handler_pc);
+}
+
 // Resets all non-deterministic emulator state to fixed values so that
 // identical inputs always produce identical traces.
 // Currently handles: SMPC RTC (host wall-clock seeding).
