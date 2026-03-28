@@ -77,11 +77,18 @@ make -j$(nproc) \
   LIBS="-lFLAC -liconv -lssp -lws2_32 -ldxguid -lwinmm -ldinput -lole32 -ldsound -limm32 -lcfgmgr32 -loleaut32 -lsetupapi -lversion -lhid -lgdi32 -ldbghelp"
 
 if [ "$DEBUG_MODE" = 1 ]; then
-  # Debug: do NOT strip — keep symbols for crash dump analysis
+  # Separate debug symbols using objcopy (standard GNU approach):
+  # 1. Extract debug info to .dbg file
+  # 2. Strip the exe for runtime
+  # 3. Link them so debuggers can find the symbols
+  x86_64-w64-mingw32-objcopy --only-keep-debug mednafen.exe ../mednafen.dbg
+  x86_64-w64-mingw32-strip --strip-debug mednafen.exe
+  x86_64-w64-mingw32-objcopy --add-gnu-debuglink=../mednafen.dbg mednafen.exe
   cp -f mednafen.exe ../mednafen_debug.exe
-  echo "=== DEBUG binary saved as mednafen_debug.exe (NOT stripped) ==="
+  echo "=== Debug build: mednafen_debug.exe (stripped) + mednafen.dbg (symbols) ==="
+  echo "=== Load both in GDB/WinDbg for full source-level debugging ==="
 else
-  # Release: strip (unstripped binary has 21 sections + 106K COFF symbols, Windows rejects it)
+  # Release: strip (unstripped has too many COFF symbols for some Windows loaders)
   x86_64-w64-mingw32-strip mednafen.exe
   cp -f mednafen.exe ../mednafen_gcc494.exe
 fi
