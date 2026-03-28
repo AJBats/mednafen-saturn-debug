@@ -20,6 +20,8 @@
 
 #ifdef WIN32
  #include <mednafen/win32-common.h>
+ #include <windows.h>
+ #include <dbghelp.h>
 #else
  #include <unistd.h>
 #endif
@@ -2180,8 +2182,86 @@ extern "C"
 }
 __attribute__((force_align_arg_pointer))	// Not sure what's going on to cause this to be needed.
 #endif
+#ifdef WIN32
+static volatile LONG crash_handler_entered = 0;
+
+static void WriteCrashDump(EXCEPTION_POINTERS* ep)
+{
+ // Prevent re-entrancy (heap corruption can trigger multiple exceptions)
+ if (InterlockedCompareExchange(&crash_handler_entered, 1, 0) != 0)
+  return;
+
+ char dump_path[MAX_PATH];
+ char* env_path = getenv("MEDNAFEN_CRASH_DUMP_DIR");
+ if (env_path && env_path[0]) {
+  snprintf(dump_path, sizeof(dump_path), "%s\\mednafen_crash_%lu.dmp",
+           env_path, (unsigned long)GetCurrentProcessId());
+ } else {
+  snprintf(dump_path, sizeof(dump_path), "mednafen_crash_%lu.dmp",
+           (unsigned long)GetCurrentProcessId());
+ }
+
+ HANDLE hFile = CreateFileA(dump_path, GENERIC_WRITE, 0, NULL,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+ if (hFile != INVALID_HANDLE_VALUE) {
+  MINIDUMP_EXCEPTION_INFORMATION mei;
+  mei.ThreadId = GetCurrentThreadId();
+  mei.ExceptionPointers = ep;
+  mei.ClientPointers = FALSE;
+  // Use MiniDumpNormal for smaller files — full memory dumps are 100MB+
+  MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), hFile,
+                    MiniDumpNormal, &mei, NULL, NULL);
+  CloseHandle(hFile);
+
+  // Use WriteFile instead of fprintf — heap may be corrupted, stdio unsafe
+  HANDLE hErr = GetStdHandle(STD_ERROR_HANDLE);
+  char msg[512];
+  int len = snprintf(msg, sizeof(msg), "CRASH: Dump written to %s\n", dump_path);
+  DWORD written;
+  WriteFile(hErr, msg, len, &written, NULL);
+ }
+
+ // Print exception info via WriteFile (not fprintf — heap unsafe)
+ HANDLE hErr = GetStdHandle(STD_ERROR_HANDLE);
+ char msg[256];
+ int len = snprintf(msg, sizeof(msg),
+  "CRASH: Exception 0x%08lX at address 0x%p\n",
+  (unsigned long)ep->ExceptionRecord->ExceptionCode,
+  ep->ExceptionRecord->ExceptionAddress);
+ DWORD written;
+ WriteFile(hErr, msg, len, &written, NULL);
+}
+
+static LONG WINAPI CrashDumpFilter(EXCEPTION_POINTERS* ep)
+{
+ WriteCrashDump(ep);
+ return EXCEPTION_EXECUTE_HANDLER;
+}
+
+static LONG CALLBACK CrashDumpVEH(EXCEPTION_POINTERS* ep)
+{
+ // Only fire on fatal exceptions — not breakpoints, guard pages, etc.
+ DWORD code = ep->ExceptionRecord->ExceptionCode;
+ // Fatal exception codes — use numeric values for GCC 4.9.4 compatibility
+ if (code == 0xC0000005 /* STATUS_ACCESS_VIOLATION */ ||
+     code == 0xC0000374 /* STATUS_HEAP_CORRUPTION */ ||
+     code == 0xC0000409 /* STATUS_STACK_BUFFER_OVERRUN */ ||
+     code == 0xC00000FD /* STATUS_STACK_OVERFLOW */) {
+  WriteCrashDump(ep);
+ }
+ return EXCEPTION_CONTINUE_SEARCH;  // let normal handling proceed
+}
+#endif
+
 int main(int argc, char *argv[])
 {
+#ifdef WIN32
+	// Install crash dump handlers FIRST — before anything else can crash.
+	// Belt-and-suspenders: VEH catches heap corruption (which may bypass
+	// the unhandled exception filter), UEF catches everything else.
+	AddVectoredExceptionHandler(1, CrashDumpVEH);
+	SetUnhandledExceptionFilter(CrashDumpFilter);
+#endif
 	// SuppressErrorPopups must be set very early.
 	{
 	 char* mnp = getenv("MEDNAFEN_NOPOPUPS");

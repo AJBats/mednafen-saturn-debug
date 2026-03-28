@@ -152,7 +152,16 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
             os.remove(f)
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    med_bin = os.path.join(script_dir, "src", "mednafen.exe")
+    # Prefer debug build (has crash dump handler + symbols), fall back to release
+    med_debug = os.path.join(script_dir, "mednafen_debug.exe")
+    med_primary = os.path.join(script_dir, "src", "mednafen.exe")
+    med_fallback = os.path.join(script_dir, "mednafen_gcc494.exe")
+    if os.path.exists(med_debug):
+        med_bin = med_debug
+    elif os.path.exists(med_primary):
+        med_bin = med_primary
+    else:
+        med_bin = med_fallback
 
     # Project-local MEDNAFEN_HOME so multiple instances can run side-by-side.
     # Priority: --home-dir flag > MEDNAFEN_HOME env var > script_dir/home default
@@ -166,6 +175,10 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
 
     env = os.environ.copy()
     env["MEDNAFEN_HOME"] = med_home
+    # Point crash dumps to SaturnAutoRE/crash_dumps/
+    crash_dir = os.path.join(script_dir, "..", "crash_dumps")
+    os.makedirs(crash_dir, exist_ok=True)
+    env["MEDNAFEN_CRASH_DUMP_DIR"] = os.path.abspath(crash_dir)
 
     stderr_f = tempfile.NamedTemporaryFile(mode="w", suffix="_med.txt", delete=False)
     _proc = subprocess.Popen(

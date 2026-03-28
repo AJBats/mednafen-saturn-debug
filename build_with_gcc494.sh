@@ -46,10 +46,27 @@ cp -f /usr/x86_64-w64-mingw32/lib/libmsvcrt.a $GCC494_SYSROOT/lib/
   CPPFLAGS="-DUNICODE -D_UNICODE -D_LFS64_LARGEFILE=1 -I$GCC494_SYSROOT/include" \
   LDFLAGS="-L$GCC494_SYSROOT/lib -static"
 
-# Patch Makefile
+# Debug mode: pass --debug as first argument
+DEBUG_MODE=0
+if [ "${1:-}" = "--debug" ]; then
+  DEBUG_MODE=1
+  echo "=== DEBUG BUILD (symbols, no strip, -O1) ==="
+fi
+
+# Patch ALL Makefiles (autotools generates per-directory Makefiles)
 cd src
-sed -i 's|^CFLAGS = |CFLAGS = -O2 |'     Makefile
-sed -i 's|^CXXFLAGS = |CXXFLAGS = -O2 |' Makefile
+if [ "$DEBUG_MODE" = 1 ]; then
+  # Replace standalone -O2 flag with -O1 -g in ALL Makefiles.
+  # Use word boundary to avoid replacing -O2 inside other flags like -Wframe-larger-than.
+  # Match -O2 preceded by space (or start) and followed by space.
+  find . -name Makefile -exec sed -i 's| -O2 | -O1 -g |g' {} +
+  # Also disable -Werror=write-strings and relax frame size warnings for debug
+  find . -name Makefile -exec sed -i 's|-Wframe-larger-than=32768|-Wframe-larger-than=131072|g' {} +
+  find . -name Makefile -exec sed -i 's|-Wstack-usage=32768|-Wstack-usage=131072|g' {} +
+else
+  sed -i 's|^CFLAGS = |CFLAGS = -O2 |'     Makefile
+  sed -i 's|^CXXFLAGS = |CXXFLAGS = -O2 |' Makefile
+fi
 sed -i '/^CPPFLAGS = / { /-DUNICODE/! s|^CPPFLAGS = |CPPFLAGS = -DUNICODE -D_UNICODE | }' Makefile
 # Remove system GCC 13 include/library paths that configure injects
 sed -i 's|-I/usr/x86_64-w64-mingw32/include ||g' Makefile
@@ -57,13 +74,17 @@ sed -i 's|-L/usr/x86_64-w64-mingw32/lib ||g' Makefile
 
 # Build
 make -j$(nproc) \
-  LIBS="-lFLAC -liconv -lssp -lws2_32 -ldxguid -lwinmm -ldinput -lole32 -ldsound -limm32 -lcfgmgr32 -loleaut32 -lsetupapi -lversion -lhid -lgdi32"
+  LIBS="-lFLAC -liconv -lssp -lws2_32 -ldxguid -lwinmm -ldinput -lole32 -ldsound -limm32 -lcfgmgr32 -loleaut32 -lsetupapi -lversion -lhid -lgdi32 -ldbghelp"
 
-# Strip (unstripped binary has 21 sections + 106K COFF symbols, Windows rejects it)
-x86_64-w64-mingw32-strip mednafen.exe
-
-# Also save to stable location (native Linux rebuild does make clean which wipes src/)
-cp -f mednafen.exe ../mednafen_gcc494.exe
+if [ "$DEBUG_MODE" = 1 ]; then
+  # Debug: do NOT strip — keep symbols for crash dump analysis
+  cp -f mednafen.exe ../mednafen_debug.exe
+  echo "=== DEBUG binary saved as mednafen_debug.exe (NOT stripped) ==="
+else
+  # Release: strip (unstripped binary has 21 sections + 106K COFF symbols, Windows rejects it)
+  x86_64-w64-mingw32-strip mednafen.exe
+  cp -f mednafen.exe ../mednafen_gcc494.exe
+fi
 
 echo "=== Output: $(ls -lh mednafen.exe 2>/dev/null || echo 'BUILD FAILED') ==="
 echo "=== Compiler used ==="

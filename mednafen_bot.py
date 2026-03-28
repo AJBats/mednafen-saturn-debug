@@ -15,10 +15,16 @@ _DEFAULT_HOME = os.path.join(MEDNAFEN_DIR, "home")
 
 
 def _find_mednafen():
-    """Find the Mednafen executable."""
+    """Find the Mednafen executable. Prefers debug build if available."""
+    # Debug build (unstripped, with symbols for crash dumps)
+    debug = os.path.join(MEDNAFEN_DIR, "mednafen_debug.exe")
+    if os.path.exists(debug):
+        return debug
+    # Release build in src/ (freshly compiled)
     primary = os.path.join(MEDNAFEN_DIR, "src", "mednafen.exe")
     if os.path.exists(primary):
         return primary
+    # Release build (stable copy)
     fallback = os.path.join(MEDNAFEN_DIR, "mednafen_gcc494.exe")
     if os.path.exists(fallback):
         return fallback
@@ -74,6 +80,10 @@ class MednafenBot:
 
         env = os.environ.copy()
         env["MEDNAFEN_HOME"] = self.home_dir
+        # Point crash dumps to the SaturnAutoRE crash_dumps dir
+        crash_dir = os.path.join(MEDNAFEN_DIR, "..", "crash_dumps")
+        os.makedirs(crash_dir, exist_ok=True)
+        env["MEDNAFEN_CRASH_DUMP_DIR"] = os.path.abspath(crash_dir)
 
         self.stderr_file = tempfile.NamedTemporaryFile(
             mode="w", suffix="_mednafen_stderr.txt", delete=False,
