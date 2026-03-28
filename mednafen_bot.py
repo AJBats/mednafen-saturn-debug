@@ -90,6 +90,7 @@ class MednafenBot:
         )
         self.proc = subprocess.Popen(
             [med_bin, "--sound", "1" if self.sound else "0",
+             "-cd.image_memcache", "1",
              "--automation", self.ipc_dir, self.cue_path],
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,

@@ -183,6 +183,7 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
     stderr_f = tempfile.NamedTemporaryFile(mode="w", suffix="_med.txt", delete=False)
     _proc = subprocess.Popen(
         [med_bin, "--sound", "1" if sound else "0",
+         "-cd.image_memcache", "1",
          "--automation", ipc, cue],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
