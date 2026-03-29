@@ -1054,7 +1054,7 @@ void Automation_EnableMemProfile(const char* path, uint32 lo, uint32 hi)
  memprofile_hi = hi & 0x0FFFFFFF;
  memprofile_file = fopen(path, "w");
  if(memprofile_file)
-  fprintf(memprofile_file, "# Mem write profile: 0x%08X-0x%08X\n# pc addr value size cycle\n",
+  fprintf(memprofile_file, "# Mem write profile: 0x%08X-0x%08X\n# pc addr val sz\n",
    lo, hi);
 }
 
@@ -1074,7 +1074,7 @@ void Automation_EnableMemReadProfile(const char* path, uint32 lo, uint32 hi)
  memreadprofile_hi = hi & 0x0FFFFFFF;
  memreadprofile_file = fopen(path, "w");
  if(memreadprofile_file)
-  fprintf(memreadprofile_file, "# Mem read profile: 0x%08X-0x%08X\n# pc pr addr size\n",
+  fprintf(memreadprofile_file, "# Mem read profile: 0x%08X-0x%08X\n# pc pr addr sz\n",
    lo, hi);
 }
 

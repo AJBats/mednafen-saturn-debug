@@ -1048,7 +1048,7 @@ async def mem_profile_stop() -> str:
     if not os.path.exists(path):
         return "OK: profiling stopped (no data)"
     with open(path) as f:
-        lines = f.readlines()
+        lines = [l for l in f.readlines() if not l.startswith("#")]
     writers = {}
     for line in lines:
         for token in line.strip().split():
@@ -1089,7 +1089,7 @@ async def mem_read_profile_stop() -> str:
     if not os.path.exists(path):
         return "OK: profiling stopped (no data)"
     with open(path) as f:
-        lines = f.readlines()
+        lines = [l for l in f.readlines() if not l.startswith("#")]
     readers = {}
     for line in lines:
         for token in line.strip().split():

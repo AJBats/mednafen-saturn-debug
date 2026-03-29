@@ -1136,7 +1136,7 @@ static void process_command(const std::string& line)
    write_ack("error mem_profile: usage: mem_profile <lo_hex> <hi_hex> <path>");
   } else {
    MDFN_IEN_SS::Automation_EnableMemProfile(path.c_str(), lo, hi);
-   char buf[128];
+   char buf[256];
    snprintf(buf, sizeof(buf), "ok mem_profile 0x%08X-0x%08X %s", lo, hi, path.c_str());
    write_ack(buf);
   }
@@ -1410,7 +1410,11 @@ void Automation_Kill(void)
   delete[] cached_fb_lw;      cached_fb_lw = nullptr;
   cached_fb_valid = false;
   MDFN_IEN_SS::Automation_CDLStop();
+  MDFN_IEN_SS::Automation_DisableMemProfile();
   MDFN_IEN_SS::Automation_DisableMemReadProfile();
+  MDFN_IEN_SS::Automation_DisableDMATrace();
+  MDFN_IEN_SS::Automation_DisableCallTrace();
+  MDFN_IEN_SS::Automation_DisableInsnTrace();
  }
 }
 
