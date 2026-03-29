@@ -197,6 +197,12 @@ static FILE* memprofile_file = nullptr;
 static uint32 memprofile_lo = 0;   // Start address (masked to 0x0FFFFFFF)
 static uint32 memprofile_hi = 0;   // End address (inclusive, masked)
 
+// Automation: Memory read profiling
+// Logs {pc, pr, addr, size} for reads in a configurable address range.
+static FILE* memreadprofile_file = nullptr;
+static uint32 memreadprofile_lo = 0;
+static uint32 memreadprofile_hi = 0;
+
 // Forward declaration — used in scu.inc, defined below
 void Automation_LogDMA(int level, uint32 src, uint32 dst, uint32 bytes);
 
@@ -1057,6 +1063,26 @@ void Automation_DisableMemProfile(void)
  if(memprofile_file) {
   fclose(memprofile_file);
   memprofile_file = nullptr;
+ }
+}
+
+// Memory read profiling
+void Automation_EnableMemReadProfile(const char* path, uint32 lo, uint32 hi)
+{
+ if(memreadprofile_file) fclose(memreadprofile_file);
+ memreadprofile_lo = lo & 0x0FFFFFFF;
+ memreadprofile_hi = hi & 0x0FFFFFFF;
+ memreadprofile_file = fopen(path, "w");
+ if(memreadprofile_file)
+  fprintf(memreadprofile_file, "# Mem read profile: 0x%08X-0x%08X\n# pc pr addr size\n",
+   lo, hi);
+}
+
+void Automation_DisableMemReadProfile(void)
+{
+ if(memreadprofile_file) {
+  fclose(memreadprofile_file);
+  memreadprofile_file = nullptr;
  }
 }
 

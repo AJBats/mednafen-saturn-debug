@@ -2633,6 +2633,13 @@ INLINE void SH7095::Cache_CheckReadIncoherency(CacheEntry* cent, const int way, 
   if(cra >= cdl_lo && cra + sizeof(T) <= cdl_hi)								\
    for(uint32 ci = 0; ci < sizeof(T); ci++) cdl_bitmap[cra - cdl_lo + ci] |= 0x02;				\
  }														\
+ /* Memory read profiling */											\
+ if(IsInstr <= 0 && MDFN_UNLIKELY(memreadprofile_file != nullptr))						\
+ {														\
+  uint32 mra = A & 0x0FFFFFFF;											\
+  if(mra >= memreadprofile_lo && mra <= memreadprofile_hi)							\
+   fprintf(memreadprofile_file, "pc=0x%08X pr=0x%08X addr=0x%08X sz=%zu\n", PC, PR, A, sizeof(T));	\
+ }														\
 														\
  switch(region)													\
  {														\

@@ -74,6 +74,8 @@
  *   dma_trace_stop              - Stop DMA trace logging
  *   mem_profile <lo> <hi> <path> - Log writes to address range [lo,hi] to text file
  *   mem_profile_stop            - Stop memory write profiling
+ *   mem_read_profile <lo> <hi> <path> - Log CPU reads in address range to text file (pc, pr, addr, sz)
+ *   mem_read_profile_stop       - Stop memory read profiling
  *   mem_sample <addr> <sz> <frames> <path> - Dump memory region every frame for N frames to binary file
  *   mem_sample_stop             - Abort memory sampling early
  *   save_state <path>           - Save full emulator state to file
@@ -1143,6 +1145,23 @@ static void process_command(const std::string& line)
   MDFN_IEN_SS::Automation_DisableMemProfile();
   write_ack("ok mem_profile_stop");
  }
+ else if (cmd == "mem_read_profile") {
+  uint32_t lo = 0, hi = 0;
+  std::string path;
+  iss >> std::hex >> lo >> hi >> path;
+  if (path.empty()) {
+   write_ack("error mem_read_profile: usage: mem_read_profile <lo_hex> <hi_hex> <path>");
+  } else {
+   MDFN_IEN_SS::Automation_EnableMemReadProfile(path.c_str(), lo, hi);
+   char buf[256];
+   snprintf(buf, sizeof(buf), "ok mem_read_profile 0x%08X-0x%08X %s", lo, hi, path.c_str());
+   write_ack(buf);
+  }
+ }
+ else if (cmd == "mem_read_profile_stop") {
+  MDFN_IEN_SS::Automation_DisableMemReadProfile();
+  write_ack("ok mem_read_profile_stop");
+ }
  else if (cmd == "mem_sample") {
   uint32_t addr = 0, sz = 0;
   int64_t frames = 0;
@@ -1391,6 +1410,7 @@ void Automation_Kill(void)
   delete[] cached_fb_lw;      cached_fb_lw = nullptr;
   cached_fb_valid = false;
   MDFN_IEN_SS::Automation_CDLStop();
+  MDFN_IEN_SS::Automation_DisableMemReadProfile();
  }
 }
 

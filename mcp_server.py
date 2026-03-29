@@ -1061,6 +1061,47 @@ async def mem_profile_stop() -> str:
     return summary
 
 
+@mcp.tool()
+async def mem_read_profile_start(address_lo: str, address_hi: str) -> str:
+    """Start logging all CPU reads in an address range. Addresses in hex.
+    Logs pc, pr (caller), addr, and size for each read. Use to find all
+    functions that read from a memory region (e.g. disc-loaded track data)."""
+    if not _alive():
+        return "FAIL: No session"
+    lo = _strip_hex(address_lo)
+    hi = _strip_hex(address_hi)
+    path = _ipc_path("mem_read_profile.txt")
+    if os.path.exists(path):
+        os.remove(path)
+    ack = await _send_and_wait(
+        f"mem_read_profile {lo} {hi} {wsl_path(path)}",
+        "ok mem_read_profile", timeout=5)
+    return ack if ack else "FAIL: timed out"
+
+
+@mcp.tool()
+async def mem_read_profile_stop() -> str:
+    """Stop memory read profiling and return summary of reader PCs."""
+    if not _alive():
+        return "FAIL: No session"
+    ack = await _send_and_wait("mem_read_profile_stop", "ok mem_read_profile_stop", timeout=5)
+    path = _ipc_path("mem_read_profile.txt")
+    if not os.path.exists(path):
+        return "OK: profiling stopped (no data)"
+    with open(path) as f:
+        lines = f.readlines()
+    readers = {}
+    for line in lines:
+        for token in line.strip().split():
+            if token.startswith("pc="):
+                pc = token.split("=")[1]
+                readers[pc] = readers.get(pc, 0) + 1
+    summary = f"Total reads: {len(lines)}\n\nReaders:\n"
+    for pc, count in sorted(readers.items(), key=lambda x: -x[1])[:20]:
+        summary += f"  {pc}: {count}\n"
+    return summary
+
+
 # ---------------------------------------------------------------------------
 # Execution control
 # ---------------------------------------------------------------------------

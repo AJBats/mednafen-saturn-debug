@@ -85,6 +85,10 @@ namespace MDFN_IEN_SS {
  uint32 Automation_CDLGetHi(void);
  uint32 Automation_CDLGetSize(void);
 
+ // Memory read profiling
+ void Automation_EnableMemReadProfile(const char* path, uint32 lo, uint32 hi);
+ void Automation_DisableMemReadProfile(void);
+
  // DMA trace logging
  void Automation_EnableDMATrace(const char* path);
  void Automation_DisableDMATrace(void);
