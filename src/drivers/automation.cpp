@@ -63,10 +63,12 @@
  *                               Reports type, PC, SR, VBR, handler address + full register dump + call stack.
  *   vdp2_watchpoint <lo> <hi> <path> - Watch VDP2 address range
  *   vdp2_watchpoint_clear      - Remove VDP2 watchpoint
- *   cdl_start                   - Start Code/Data Logging (clears bitmap, marks code/data per byte)
+ *   cdl_start [lo hi]           - Start Code/Data Logging for address range [lo,hi)
+ *                                 Defaults to HWR (0x06000000–0x06100000) if no args.
+ *                                 Example: cdl_start 00200000 00300000 (LWR, 1MB)
  *   cdl_stop                    - Stop CDL (preserves bitmap)
  *   cdl_reset                   - Clear CDL bitmap without stopping
- *   cdl_dump <path>             - Dump 1MB CDL bitmap to binary file
+ *   cdl_dump <path>             - Dump CDL bitmap to file (8-byte header: lo+hi, then bitmap)
  *   cdl_status                  - Report CDL active state
  *   dma_trace <path>            - Start logging SCU DMA transfers to text file
  *   dma_trace_stop              - Stop DMA trace logging
@@ -1059,8 +1061,32 @@ static void process_command(const std::string& line)
   write_ack(buf);
  }
  else if (cmd == "cdl_start") {
-  MDFN_IEN_SS::Automation_CDLStart();
-  write_ack("ok cdl_start");
+  // Optional: cdl_start <lo_hex> <hi_hex>
+  // Defaults to HWR: 0x06000000-0x06100000
+  uint32_t lo = 0x06000000, hi = 0x06100000;
+  uint32_t user_lo;
+  if (iss >> std::hex >> user_lo) {
+   uint32_t user_hi;
+   if (!(iss >> std::hex >> user_hi)) {
+    write_ack("error cdl_start: need both lo and hi, or neither");
+   } else {
+    lo = user_lo;
+    hi = user_hi;
+   }
+  }
+  MDFN_IEN_SS::Automation_CDLStart(lo, hi);
+  // Use actual range from CDL state (after masking/validation)
+  uint32_t actual_lo = MDFN_IEN_SS::Automation_CDLGetLo();
+  uint32_t actual_hi = MDFN_IEN_SS::Automation_CDLGetHi();
+  uint32_t actual_size = MDFN_IEN_SS::Automation_CDLGetSize();
+  if (actual_size == 0) {
+   write_ack("error cdl_start: invalid range");
+  } else {
+   char buf[128];
+   snprintf(buf, sizeof(buf), "ok cdl_start 0x%08X-0x%08X (%uKB)",
+            actual_lo, actual_hi, actual_size / 1024);
+   write_ack(buf);
+  }
  }
  else if (cmd == "cdl_stop") {
   MDFN_IEN_SS::Automation_CDLStop();
@@ -1364,6 +1390,7 @@ void Automation_Kill(void)
   delete[] cached_fb_pixels;  cached_fb_pixels = nullptr;
   delete[] cached_fb_lw;      cached_fb_lw = nullptr;
   cached_fb_valid = false;
+  MDFN_IEN_SS::Automation_CDLStop();
  }
 }
 

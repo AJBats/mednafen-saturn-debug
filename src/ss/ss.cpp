@@ -32,6 +32,7 @@
 #include <mednafen/Time.h>
 
 #include <bitset>
+#include <new>  // for std::nothrow
 
 #include <trio/trio.h>
 
@@ -182,7 +183,10 @@ static FILE* automation_vdp2wp_log = nullptr;
 // Bit 1 (0x02): DATA_READ — read as data
 // Bit 2 (0x04): DATA_WRITE — written as data
 static bool cdl_active = false;
-static uint8 cdl_bitmap[0x100000];  // 1MB — one byte per High WRAM byte
+static uint8* cdl_bitmap = nullptr;
+static uint32 cdl_lo = 0;
+static uint32 cdl_hi = 0;
+static uint32 cdl_size = 0;
 
 // Automation: DMA trace logging
 static FILE* dma_trace_file = nullptr;
@@ -939,10 +943,39 @@ void Automation_ClearVDP2Watchpoint(void)
  if(automation_vdp2wp_log) { fclose(automation_vdp2wp_log); automation_vdp2wp_log = nullptr; }
 }
 
-// CDL (Code/Data Logging)
-void Automation_CDLStart(void)
+// CDL (Code/Data Logging) — configurable address range
+void Automation_CDLStart(uint32 lo, uint32 hi)
 {
- memset(cdl_bitmap, 0, sizeof(cdl_bitmap));
+ uint32 masked_lo = lo & 0x0FFFFFFF;
+ uint32 masked_hi = hi & 0x0FFFFFFF;
+
+ // Validate range
+ if(masked_hi <= masked_lo || (masked_hi - masked_lo) > 16 * 1024 * 1024) {
+  cdl_active = false;
+  return;
+ }
+
+ // Free previous bitmap if range changed
+ if(cdl_bitmap && (masked_lo != cdl_lo || masked_hi != cdl_hi)) {
+  delete[] cdl_bitmap;
+  cdl_bitmap = nullptr;
+ }
+
+ cdl_lo = masked_lo;
+ cdl_hi = masked_hi;
+ cdl_size = cdl_hi - cdl_lo;
+
+ if(!cdl_bitmap) {
+  cdl_bitmap = new(std::nothrow) uint8[cdl_size]();
+  if(!cdl_bitmap) {
+   cdl_active = false;
+   cdl_size = 0;
+   return;
+  }
+ } else {
+  memset(cdl_bitmap, 0, cdl_size);
+ }
+
  cdl_active = true;
 }
 
@@ -953,14 +986,20 @@ void Automation_CDLStop(void)
 
 void Automation_CDLReset(void)
 {
- memset(cdl_bitmap, 0, sizeof(cdl_bitmap));
+ if(cdl_bitmap)
+  memset(cdl_bitmap, 0, cdl_size);
 }
 
 bool Automation_CDLDump(const char* path)
 {
+ if(!cdl_bitmap || !cdl_size) return false;
  FILE* f = fopen(path, "wb");
  if(!f) return false;
- fwrite(cdl_bitmap, 1, sizeof(cdl_bitmap), f);
+ // 8-byte header: lo (4 bytes LE) + hi (4 bytes LE)
+ // Consumers read this to know the address range
+ uint32 header[2] = { cdl_lo, cdl_hi };
+ fwrite(header, 4, 2, f);
+ fwrite(cdl_bitmap, 1, cdl_size, f);
  fclose(f);
  return true;
 }
@@ -969,6 +1008,10 @@ bool Automation_CDLIsActive(void)
 {
  return cdl_active;
 }
+
+uint32 Automation_CDLGetLo(void) { return cdl_lo; }
+uint32 Automation_CDLGetHi(void) { return cdl_hi; }
+uint32 Automation_CDLGetSize(void) { return cdl_size; }
 
 // DMA trace logging
 void Automation_EnableDMATrace(const char* path)

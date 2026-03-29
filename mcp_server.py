@@ -950,11 +950,16 @@ async def dump_vdp2_regs(path: str) -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def cdl_start() -> str:
-    """Start code/data logging. Tracks which bytes are executed vs read vs written."""
+async def cdl_start(address_lo: str = "0x06000000", address_hi: str = "0x06100000") -> str:
+    """Start code/data logging for an address range.
+    Tracks which bytes are executed (CODE), read (DATA_READ), or written (DATA_WRITE).
+    Defaults to High Work RAM (0x06000000-0x06100000, 1MB).
+    Example for Low Work RAM: address_lo='0x00200000', address_hi='0x00300000'."""
     if not _alive():
         return "FAIL: No session"
-    ack = await _send_and_wait("cdl_start", "cdl_start", timeout=5)
+    lo = _strip_hex(address_lo)
+    hi = _strip_hex(address_hi)
+    ack = await _send_and_wait(f"cdl_start {lo} {hi}", "cdl_start", timeout=5)
     return ack if ack else "FAIL: timed out"
 
 

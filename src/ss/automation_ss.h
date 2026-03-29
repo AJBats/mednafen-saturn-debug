@@ -75,12 +75,15 @@ namespace MDFN_IEN_SS {
  void Automation_EnableInsnTraceUnified(int64_t start_line, int64_t stop_line);
  void Automation_DisableInsnTrace(void);
 
- // Code/Data Logging (CDL)
- void Automation_CDLStart(void);
+ // Code/Data Logging (CDL) — configurable address range
+ void Automation_CDLStart(uint32 lo, uint32 hi);
  void Automation_CDLStop(void);
  void Automation_CDLReset(void);
  bool Automation_CDLDump(const char* path);
  bool Automation_CDLIsActive(void);
+ uint32 Automation_CDLGetLo(void);
+ uint32 Automation_CDLGetHi(void);
+ uint32 Automation_CDLGetSize(void);
 
  // DMA trace logging
  void Automation_EnableDMATrace(const char* path);

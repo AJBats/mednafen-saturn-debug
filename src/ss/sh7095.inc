@@ -2627,11 +2627,11 @@ INLINE void SH7095::Cache_CheckReadIncoherency(CacheEntry* cent, const int way, 
 														\
  DevBuild_ReadLog<T>(A); 											\
  /* CDL: mark as DATA_READ */											\
- if(IsInstr <= 0 && MDFN_UNLIKELY(cdl_active))									\
+ if(IsInstr <= 0 && MDFN_UNLIKELY(cdl_active) && cdl_bitmap)							\
  {														\
   uint32 cra = A & 0x0FFFFFFF;											\
-  if(cra >= 0x06000000 && cra + sizeof(T) <= 0x06100000)							\
-   for(uint32 ci = 0; ci < sizeof(T); ci++) cdl_bitmap[cra - 0x06000000 + ci] |= 0x02;				\
+  if(cra >= cdl_lo && cra + sizeof(T) <= cdl_hi)								\
+   for(uint32 ci = 0; ci < sizeof(T); ci++) cdl_bitmap[cra - cdl_lo + ci] |= 0x02;				\
  }														\
 														\
  switch(region)													\
@@ -2761,12 +2761,12 @@ INLINE void SH7095::Cache_CheckReadIncoherency(CacheEntry* cent, const int way, 
 										\
  DevBuild_WriteLog<T>(A, V);							\
  /* CDL: mark as DATA_WRITE */							\
- if(MDFN_UNLIKELY(cdl_active))							\
+ if(MDFN_UNLIKELY(cdl_active) && cdl_bitmap)					\
  {										\
   uint32 cwa = A & 0x0FFFFFFF;							\
-  if(cwa >= 0x06000000 && cwa + sizeof(T) <= 0x06100000)			\
+  if(cwa >= cdl_lo && cwa + sizeof(T) <= cdl_hi)				\
    for(uint32 cwi = 0; cwi < sizeof(T); cwi++)				\
-    cdl_bitmap[cwa - 0x06000000 + cwi] |= 0x04;				\
+    cdl_bitmap[cwa - cdl_lo + cwi] |= 0x04;				\
  }										\
  /* Memory write profiling */							\
  if(MDFN_UNLIKELY(memprofile_file != nullptr))					\
@@ -3210,12 +3210,12 @@ static const uint8 InstrDecodeTab[65536] =
    Pipe_IF = Cache_ReadDataArray<uint16>(PC);				\
  }									\
  /* CDL: mark 2 bytes as CODE */					\
- if(MDFN_UNLIKELY(cdl_active))						\
+ if(MDFN_UNLIKELY(cdl_active) && cdl_bitmap)				\
  {									\
   uint32 ca = PC & 0x0FFFFFFF;						\
-  if(ca >= 0x06000000 && ca <= 0x060FFFFE)				\
+  if(ca >= cdl_lo && ca + 1 < cdl_hi)					\
   {									\
-   uint32 off = ca - 0x06000000;					\
+   uint32 off = ca - cdl_lo;						\
    cdl_bitmap[off]   |= 0x01;						\
    cdl_bitmap[off+1] |= 0x01;						\
   }									\
