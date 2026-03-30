@@ -119,6 +119,16 @@
 
 static FILE* unified_trace_file = nullptr;
 static bool automation_active = false;
+
+// Check if the main thread received a quit request (SDL_QUIT from window
+// close, etc.) so spin-wait loops can exit cleanly.  The main thread's
+// PumpWrap() handles SDL events and sets NeedExitNow; we just check it
+// here since SDL_PumpEvents must only be called from the main thread.
+static void check_exit_requested(void)
+{
+ if (MainExitPending())
+  automation_active = false;
+}
 static std::string action_file;
 static std::string ack_file;
 static std::string auto_base_dir;
@@ -1394,28 +1404,38 @@ void Automation_Poll(const MDFN_Surface* surface, const MDFN_Rect* rect, const i
   nanosleep(&ts, NULL);
 #endif
   check_action_file();
+  check_exit_requested();
  }
 }
 
 void Automation_Kill(void)
 {
- if (automation_active) {
+ // Send shutdown ack only if we were actively running (not already
+ // cleared by check_exit_requested during a window-close).
+ if (automation_active)
   write_ack("shutdown frame=" + std::to_string(frame_counter));
-  automation_active = false;
-  close_wp_log();
-  if (rwp_log) { fclose(rwp_log); rwp_log = nullptr; }
-  if (bp_log) { fclose(bp_log); bp_log = nullptr; }
-  if (exc_log) { fclose(exc_log); exc_log = nullptr; }
-  delete[] cached_fb_pixels;  cached_fb_pixels = nullptr;
-  delete[] cached_fb_lw;      cached_fb_lw = nullptr;
-  cached_fb_valid = false;
-  MDFN_IEN_SS::Automation_CDLStop();
-  MDFN_IEN_SS::Automation_DisableMemProfile();
-  MDFN_IEN_SS::Automation_DisableMemReadProfile();
-  MDFN_IEN_SS::Automation_DisableDMATrace();
-  MDFN_IEN_SS::Automation_DisableCallTrace();
-  MDFN_IEN_SS::Automation_DisableInsnTrace();
- }
+ automation_active = false;
+
+ // Unconditionally clean up all resources — check_exit_requested may
+ // have cleared automation_active before we get here, but file handles
+ // still need flushing and closing.
+ close_wp_log();
+ if (rwp_log) { fclose(rwp_log); rwp_log = nullptr; }
+ if (bp_log) { fclose(bp_log); bp_log = nullptr; }
+ if (exc_log) { fclose(exc_log); exc_log = nullptr; }
+ if (unified_trace_file) { fclose(unified_trace_file); unified_trace_file = nullptr; }
+ if (pc_trace_file) { fclose(pc_trace_file); pc_trace_file = nullptr; }
+ if (input_trace_file) { fclose(input_trace_file); input_trace_file = nullptr; }
+ if (mem_sample_file) { fclose(mem_sample_file); mem_sample_file = nullptr; }
+ delete[] cached_fb_pixels;  cached_fb_pixels = nullptr;
+ delete[] cached_fb_lw;      cached_fb_lw = nullptr;
+ cached_fb_valid = false;
+ MDFN_IEN_SS::Automation_CDLStop();
+ MDFN_IEN_SS::Automation_DisableMemProfile();
+ MDFN_IEN_SS::Automation_DisableMemReadProfile();
+ MDFN_IEN_SS::Automation_DisableDMATrace();
+ MDFN_IEN_SS::Automation_DisableCallTrace();
+ MDFN_IEN_SS::Automation_DisableInsnTrace();
 }
 
 bool Automation_IsActive(void)
@@ -1560,6 +1580,7 @@ void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint
   nanosleep(&ts, NULL);
 #endif
   check_action_file();
+  check_exit_requested();
  }
 }
 
@@ -1626,6 +1647,7 @@ void Automation_ReadWatchpointHit(uint32_t pc, uint32_t addr, uint32_t val, uint
   nanosleep(&ts, NULL);
 #endif
   check_action_file();
+  check_exit_requested();
  }
 }
 
@@ -1706,6 +1728,7 @@ void Automation_ExceptionHit(unsigned exnum, unsigned vecnum, uint32_t pc, uint3
   nanosleep(&ts, NULL);
 #endif
   check_action_file();
+  check_exit_requested();
  }
 }
 
@@ -1805,6 +1828,7 @@ bool Automation_DebugHook(uint32_t pc)
   nanosleep(&ts, NULL);
 #endif
   check_action_file();
+  check_exit_requested();
  }
 
  return false;

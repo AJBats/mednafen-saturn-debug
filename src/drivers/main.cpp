@@ -1236,6 +1236,11 @@ void MainRequestExit(void)
  NeedExitNow = true;
 }
 
+bool MainExitPending(void)
+{
+ return NeedExitNow;
+}
+
 bool Mednafen::MDFND_CheckNeedExit(void)	// Called from netplay code, so we can break out of blocking loops after receiving a signal.
 {
  return !GameThreadRun;
