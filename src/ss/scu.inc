@@ -1791,6 +1791,9 @@ sscpu_timestamp_t SCU_UpdateDMA(sscpu_timestamp_t timestamp)
 //
 static NO_INLINE void ForceDMAFinish(void)
 {
+ unsigned saved_acpu = automation_current_cpu;
+ automation_current_cpu = 2;
+
  for(int level = 2; level >= 0; level--)
  {
   if(!DMALevel[level].Active)
@@ -1815,6 +1818,7 @@ static NO_INLINE void ForceDMAFinish(void)
  }
 
  SCU_DMA_TimeCounter = SCU_DMA_RunUntil;
+ automation_current_cpu = saved_acpu;
 }
 
 static INLINE void CheckForceDMAFinish(void)
