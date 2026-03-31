@@ -160,15 +160,17 @@ static void (*s_automation_inline_hook)(void) = nullptr;
 // Automation: memory write watchpoint state.
 // Placed before scu.inc so both BusRW_DB_CS3, SCU DMA_Write, and BBusRW_DB can access.
 static bool automation_wp_active = false;
-static uint32 automation_wp_addr = 0;       // Work RAM High offset (masked to 0xFFFFF)
+static uint32 automation_wp_addr = 0;       // Work RAM offset (masked to 0xFFFFF)
 static uint32 automation_wp_full_addr = 0;  // Full address as provided by user (for VDP1/B-bus matching)
+static bool automation_wp_is_lwr = false;   // true = Low Work RAM (CS0), false = High Work RAM (CS3)
 static bool automation_wp_filter_active = false;  // Conditional watchpoint: only fire on specific value
 static uint32 automation_wp_filter_value = 0;     // Value to match (when filter is active)
 
 // Automation: memory READ watchpoint state.
 // Same behavior as write watchpoints — pauses on hit, reports context.
 static bool automation_rwp_active = false;
-static uint32 automation_rwp_addr = 0;      // Work RAM High offset (masked to 0xFFFFF)
+static uint32 automation_rwp_addr = 0;      // Work RAM offset (masked to 0xFFFFF)
+static bool automation_rwp_is_lwr = false;  // true = Low Work RAM (CS0), false = High Work RAM (CS3)
 static bool automation_rwp_paused = false;   // true when paused on read watchpoint hit
 
 // Automation: VDP2 VRAM write watchpoint (logs ALL writes in an address range)
@@ -286,10 +288,47 @@ static INLINE void BusRW_DB_CS0(const uint32 A, uint32& DB, const bool BurstHax,
    return;
   }
 
+  // Automation watchpoint: detect writes to Low Work RAM
+  uint32 wp_old_l = 0;
+  bool wp_match_l = false;
+  if(IsWrite && MDFN_UNLIKELY(automation_wp_active && automation_wp_is_lwr))
+  {
+   uint32 write_start = A & 0xFFFFF;
+   uint32 write_end = write_start + sizeof(T);
+   uint32 wp_start = automation_wp_addr;
+   uint32 wp_end = wp_start + 4;
+   if(write_start < wp_end && write_end > wp_start)
+   {
+    wp_old_l = ne16_rbo_be<uint32>(WorkRAML, automation_wp_addr & 0xFFFFC);
+    wp_match_l = true;
+   }
+  }
+
   if(IsWrite)
    ne16_wbo_be<T>(WorkRAML, A & 0xFFFFF, DB >> (((A & 1) ^ (2 - sizeof(T))) << 3));
   else
    DB = (DB & 0xFFFF0000) | ne16_rbo_be<uint16>(WorkRAML, A & 0xFFFFE);
+
+  if(IsWrite && MDFN_UNLIKELY(wp_match_l))
+  {
+   uint32 wp_new = ne16_rbo_be<uint32>(WorkRAML, automation_wp_addr & 0xFFFFC);
+   if(wp_new != wp_old_l && (!automation_wp_filter_active || wp_new == automation_wp_filter_value))
+    ::Automation_WatchpointHit(CPU[0].PC, A, wp_old_l, wp_new, CPU[0].PR, "CPU");
+  }
+
+  // Automation: read watchpoint for Low Work RAM
+  if(!IsWrite && MDFN_UNLIKELY(automation_rwp_active && automation_rwp_is_lwr))
+  {
+   uint32 read_start = A & 0xFFFFF;
+   uint32 read_end = read_start + sizeof(T);
+   uint32 rwp_start = automation_rwp_addr;
+   uint32 rwp_end = rwp_start + 4;
+   if(read_start < rwp_end && read_end > rwp_start)
+   {
+    uint32 val = ne16_rbo_be<uint32>(WorkRAML, automation_rwp_addr & 0xFFFFC);
+    ::Automation_ReadWatchpointHit(CPU[0].PC, A, val, CPU[0].PR);
+   }
+  }
 
   return;
  }
@@ -443,7 +482,7 @@ static INLINE void BusRW_DB_CS3(const uint32 A, uint32& DB, const bool BurstHax,
  // Automation watchpoint: detect writes that overlap watched address
  uint32 wp_old = 0;
  bool wp_match = false;
- if(IsWrite && MDFN_UNLIKELY(automation_wp_active))
+ if(IsWrite && MDFN_UNLIKELY(automation_wp_active && !automation_wp_is_lwr))
  {
   uint32 write_start = A & 0xFFFFF;
   uint32 write_end = write_start + sizeof(T);
@@ -470,7 +509,7 @@ static INLINE void BusRW_DB_CS3(const uint32 A, uint32& DB, const bool BurstHax,
  }
 
  // Automation: read watchpoint — detect reads that overlap watched address
- if(!IsWrite && MDFN_UNLIKELY(automation_rwp_active))
+ if(!IsWrite && MDFN_UNLIKELY(automation_rwp_active && !automation_rwp_is_lwr))
  {
   uint32 read_start = A & 0xFFFFF;
   uint32 read_end = read_start + sizeof(T);
@@ -892,8 +931,10 @@ void Automation_DisableCPUHook(void)
 
 void Automation_SetWatchpoint(uint32 addr)
 {
+ uint32 masked = addr & 0x0FFFFFFF;
  automation_wp_full_addr = addr;
- automation_wp_addr = addr & 0xFFFFF;  // Mask to Work RAM High offset
+ automation_wp_addr = masked & 0xFFFFF;
+ automation_wp_is_lwr = (masked >= 0x00200000 && masked <= 0x003FFFFF);
  automation_wp_active = true;
  automation_wp_filter_active = false;
  automation_wp_filter_value = 0;
@@ -902,6 +943,7 @@ void Automation_SetWatchpoint(uint32 addr)
 void Automation_ClearWatchpoint(void)
 {
  automation_wp_active = false;
+ automation_wp_is_lwr = false;
  automation_wp_filter_active = false;
  automation_wp_filter_value = 0;
 }
@@ -914,13 +956,16 @@ void Automation_SetWatchpointFilter(bool active, uint32 value)
 
 void Automation_SetReadWatchpoint(uint32 addr)
 {
- automation_rwp_addr = addr & 0xFFFFF;
+ uint32 masked = addr & 0x0FFFFFFF;
+ automation_rwp_addr = masked & 0xFFFFF;
+ automation_rwp_is_lwr = (masked >= 0x00200000 && masked <= 0x003FFFFF);
  automation_rwp_active = true;
 }
 
 void Automation_ClearReadWatchpoint(void)
 {
  automation_rwp_active = false;
+ automation_rwp_is_lwr = false;
 }
 
 bool Automation_CheckReadWatchpointActive(void)

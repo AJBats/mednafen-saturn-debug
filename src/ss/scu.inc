@@ -1644,10 +1644,10 @@ static INLINE void DMA_Write(DMALevelS* d, uint32 DB)
  }
  else
  {
-  // Automation watchpoint: detect SCU DMA writes to watched address
+  // Automation watchpoint: detect SCU DMA writes to watched HWR address
   uint32 wp_old_dma = 0;
   bool wp_match_dma = false;
-  if(MDFN_UNLIKELY(automation_wp_active))
+  if(MDFN_UNLIKELY(automation_wp_active && !automation_wp_is_lwr))
   {
    uint32 ws = A & 0xFFFFF, we = ws + sizeof(T);
    if(ws < (automation_wp_addr + 4) && we > automation_wp_addr)
