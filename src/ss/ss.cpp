@@ -157,6 +157,12 @@ static int64_t automation_total_cycles = 0;
 // whether this hook is active or not.
 static void (*s_automation_inline_hook)(void) = nullptr;
 
+// Automation: which CPU is currently performing a bus access.
+// 0 = master SH-2, 1 = slave SH-2, 2 = SCU DMA (no CPU).
+// Set in ExtBusWrite_NI/ExtBusRead_NI (sh7095.inc), SH_DMA_EventHandler,
+// and SCU_UpdateDMA so watchpoint hits report the correct PC.
+static unsigned automation_current_cpu = 0;
+
 // Automation: memory write watchpoint state.
 // Placed before scu.inc so both BusRW_DB_CS3, SCU DMA_Write, and BBusRW_DB can access.
 static bool automation_wp_active = false;
@@ -313,7 +319,7 @@ static INLINE void BusRW_DB_CS0(const uint32 A, uint32& DB, const bool BurstHax,
   {
    uint32 wp_new = ne16_rbo_be<uint32>(WorkRAML, automation_wp_addr & 0xFFFFC);
    if(wp_new != wp_old_l && (!automation_wp_filter_active || wp_new == automation_wp_filter_value))
-    ::Automation_WatchpointHit(CPU[0].PC, A, wp_old_l, wp_new, CPU[0].PR, "CPU");
+    ::Automation_WatchpointHit(CPU[automation_current_cpu].PC, A, wp_old_l, wp_new, CPU[automation_current_cpu].PR, "CPU");
   }
 
   // Automation: read watchpoint for Low Work RAM
@@ -326,7 +332,7 @@ static INLINE void BusRW_DB_CS0(const uint32 A, uint32& DB, const bool BurstHax,
    if(read_start < rwp_end && read_end > rwp_start)
    {
     uint32 val = ne16_rbo_be<uint32>(WorkRAML, automation_rwp_addr & 0xFFFFC);
-    ::Automation_ReadWatchpointHit(CPU[0].PC, A, val, CPU[0].PR);
+    ::Automation_ReadWatchpointHit(CPU[automation_current_cpu].PC, A, val, CPU[automation_current_cpu].PR);
    }
   }
 
@@ -505,7 +511,7 @@ static INLINE void BusRW_DB_CS3(const uint32 A, uint32& DB, const bool BurstHax,
  {
   uint32 wp_new = ne16_rbo_be<uint32>(WorkRAMH, automation_wp_addr & 0xFFFFC);
   if(wp_new != wp_old && (!automation_wp_filter_active || wp_new == automation_wp_filter_value))
-   ::Automation_WatchpointHit(CPU[0].PC, A, wp_old, wp_new, CPU[0].PR, "CPU");
+   ::Automation_WatchpointHit(CPU[automation_current_cpu].PC, A, wp_old, wp_new, CPU[automation_current_cpu].PR, "CPU");
  }
 
  // Automation: read watchpoint — detect reads that overlap watched address
@@ -518,7 +524,7 @@ static INLINE void BusRW_DB_CS3(const uint32 A, uint32& DB, const bool BurstHax,
   if(read_start < rwp_end && read_end > rwp_start)
   {
    uint32 val = ne16_rbo_be<uint32>(WorkRAMH, automation_rwp_addr & 0xFFFFC);
-   ::Automation_ReadWatchpointHit(CPU[0].PC, A, val, CPU[0].PR);
+   ::Automation_ReadWatchpointHit(CPU[automation_current_cpu].PC, A, val, CPU[automation_current_cpu].PR);
   }
  }
 }
@@ -1332,6 +1338,7 @@ static sscpu_timestamp_t SH_DMA_EventHandler(sscpu_timestamp_t et)
  if(MDFN_UNLIKELY(SH7095_BusLock))
   return et + 1;
 
+ automation_current_cpu = c;
  return CPU[c].DMA_Update(et);
 }
 

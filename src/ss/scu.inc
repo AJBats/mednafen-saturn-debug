@@ -915,7 +915,11 @@ static INLINE void BBusRW_DB(uint32 A, uint16* DB, int32* time_thing, int32* dma
        VDP1::Write16_DB(A, *DB);
       uint16 new_val = VDP1::Read16_DB(A);
       if(old_val != new_val)
-       ::Automation_WatchpointHit(CPU[0].PC, A, (uint32)old_val, (uint32)new_val, CPU[0].PR, "VDP1");
+      {
+       uint32 wp_pc = (automation_current_cpu < 2) ? CPU[automation_current_cpu].PC : 0;
+       uint32 wp_pr = (automation_current_cpu < 2) ? CPU[automation_current_cpu].PR : 0;
+       ::Automation_WatchpointHit(wp_pc, A, (uint32)old_val, (uint32)new_val, wp_pr, "VDP1");
+      }
       return;  // already wrote
      }
     }
@@ -1661,7 +1665,7 @@ static INLINE void DMA_Write(DMALevelS* d, uint32 DB)
   {
    uint32 wp_new_dma = ne16_rbo_be<uint32>(WorkRAMH, automation_wp_addr & 0xFFFFC);
    if(wp_new_dma != wp_old_dma && (!automation_wp_filter_active || wp_new_dma == automation_wp_filter_value))
-    ::Automation_WatchpointHit(CPU[0].PC, A, wp_old_dma, wp_new_dma, CPU[0].PR, "DMA");
+    ::Automation_WatchpointHit(0, A, wp_old_dma, wp_new_dma, 0, "DMA");
   }
  }
 
@@ -1742,8 +1746,14 @@ static void SCU_DoDMAEnd(const unsigned level)
 
 sscpu_timestamp_t SCU_UpdateDMA(sscpu_timestamp_t timestamp)
 {
+ unsigned saved_acpu = automation_current_cpu;
+ automation_current_cpu = 2;
+
  if(timestamp < SH7095_mem_timestamp)
+ {
+  automation_current_cpu = saved_acpu;
   return SH7095_mem_timestamp;
+ }
  //
  //
  //
@@ -1763,11 +1773,15 @@ sscpu_timestamp_t SCU_UpdateDMA(sscpu_timestamp_t timestamp)
     if(MDFN_UNLIKELY(timestamp >= d->FinishTime))
      SCU_DoDMAEnd(level);
     else
+    {
+     automation_current_cpu = saved_acpu;
      return d->FinishTime;
+    }
    }
   }
  }
 
+ automation_current_cpu = saved_acpu;
  return SCU_DMA_RunUntil;
 }
 

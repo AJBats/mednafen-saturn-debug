@@ -2394,12 +2394,14 @@ INLINE void SH7095::ExtBusWrite_INLINE(uint32 A, T V)
 template<unsigned w, bool SlavePenalty, typename T, bool BurstHax>
 static NO_INLINE MDFN_HOT T ExtBusRead_NI(uint32 A)
 {
+ automation_current_cpu = w;
  return CPU[w].ExtBusRead_INLINE<SlavePenalty, T, BurstHax>(A);
 }
 
 template<unsigned w, bool SlavePenalty, typename T>
 static NO_INLINE MDFN_HOT void ExtBusWrite_NI(uint32 A, T V)
 {
+ automation_current_cpu = w;
  CPU[w].ExtBusWrite_INLINE<SlavePenalty, T>(A, V);
 }
 
