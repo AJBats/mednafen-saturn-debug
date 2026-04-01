@@ -860,10 +860,9 @@ void Automation_DumpRegsBin(const char* path)
  }
 }
 
-// Automation: heuristic SH-2 call stack walker.
-// Reads PC, PR, SP from CPU[0], then scans stack upward for values
-// that look like return addresses (2-byte aligned, in known code regions).
-std::string Automation_CallStack(uint32 scan_size)
+// Automation: shadow call stack — reads the per-CPU stack maintained by
+// jsr/bsr/bsrf/rts instrumentation. Self-healing via PR matching on rts.
+std::string Automation_CallStack(uint32 /*scan_size*/)
 {
  // Use automation_current_cpu if valid (0 or 1), default to master
  unsigned cpu = (automation_current_cpu < 2) ? automation_current_cpu : 0;
@@ -1658,6 +1657,7 @@ static NO_INLINE MDFN_COLD int32 RunLoop_Debug(EmulateSpecStruct* espec)
 void SS_Reset(bool powering_up)
 {
  SH7095_BusLock = 0;
+ shadow_stack_depth[0] = shadow_stack_depth[1] = 0;
 
  if(powering_up)
  {
@@ -3092,6 +3092,8 @@ static MDFN_COLD void StateAction(StateMem* sm, const unsigned load, const bool 
 
   CPU[0].PostStateLoad(load, RecordedNeedEmuICache, NeedEmuICache);
   CPU[1].PostStateLoad(load, RecordedNeedEmuICache, NeedEmuICache);
+
+  shadow_stack_depth[0] = shadow_stack_depth[1] = 0;
  }
 }
 
