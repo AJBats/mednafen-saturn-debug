@@ -1497,6 +1497,7 @@ switch(Pipe_ID >> 24)
  //
  BEGIN_OP_DLYIDIF(BSR)
 	PR = PC;
+	ShadowStack_Push(which, PC - 4, (uint32)(PC + ((uint32)sign_x_to_s32(12, instr) << 1)), PR);
 	if(MDFN_UNLIKELY(CallTraceFile != nullptr))
 	{
 	 fprintf(CallTraceFile, "%u %c %08X %08X\n", (unsigned)timestamp, which ? 'S' : 'M', PC - 4, (uint32)(PC + ((uint32)sign_x_to_s32(12, instr) << 1)));
@@ -1512,6 +1513,7 @@ switch(Pipe_ID >> 24)
  //
  BEGIN_OP_DLYIDIF(BSRF_REG)
 	PR = PC;
+	ShadowStack_Push(which, PC - 4, (uint32)(PC + R[instr_nyb2]), PR);
 	if(MDFN_UNLIKELY(CallTraceFile != nullptr))
 	{
 	 fprintf(CallTraceFile, "%u %c %08X %08X\n", (unsigned)timestamp, which ? 'S' : 'M', PC - 4, (uint32)(PC + R[instr_nyb2]));
@@ -1535,6 +1537,7 @@ switch(Pipe_ID >> 24)
  //
  BEGIN_OP_DLYIDIF(JSR_REGINDIR)
 	PR = PC;
+	ShadowStack_Push(which, PC - 4, R[instr_nyb2], PR);
 	if(MDFN_UNLIKELY(CallTraceFile != nullptr))
 	{
 	 fprintf(CallTraceFile, "%u %c %08X %08X\n", (unsigned)timestamp, which ? 'S' : 'M', PC - 4, R[instr_nyb2]);
@@ -1546,9 +1549,10 @@ switch(Pipe_ID >> 24)
 
 
  //
- // RTS 
+ // RTS
  //
  BEGIN_OP_DLYIDIF(RTS)
+	ShadowStack_PopToReturn(which, PR);
 	UCDelayBranch(PR);
  END_OP
 

@@ -163,6 +163,46 @@ static void (*s_automation_inline_hook)(void) = nullptr;
 // and SCU_UpdateDMA so watchpoint hits report the correct PC.
 static unsigned automation_current_cpu = 0;
 
+// Automation: shadow call stack — maintained by tracking jsr/bsr/bsrf/rts.
+// Self-healing: on rts, we match PR against recorded return addresses and
+// pop down to the match, discarding any orphaned frames (handles longjmp,
+// tail calls, and other non-standard control flow).
+struct ShadowCallEntry {
+ uint32 call_site;    // PC of the jsr/bsr/bsrf instruction
+ uint32 target;       // Branch target (callee entry point)
+ uint32 return_addr;  // PR value set by the call (return address)
+};
+static constexpr unsigned SHADOW_STACK_MAX = 128;
+static ShadowCallEntry shadow_stack[2][SHADOW_STACK_MAX]; // per-CPU
+static unsigned shadow_stack_depth[2] = {0, 0};
+
+static void ShadowStack_Push(unsigned cpu, uint32 call_site, uint32 target, uint32 return_addr)
+{
+ if(shadow_stack_depth[cpu] < SHADOW_STACK_MAX)
+ {
+  ShadowCallEntry& e = shadow_stack[cpu][shadow_stack_depth[cpu]++];
+  e.call_site = call_site;
+  e.target = target;
+  e.return_addr = return_addr;
+ }
+}
+
+static void ShadowStack_PopToReturn(unsigned cpu, uint32 pr)
+{
+ unsigned depth = shadow_stack_depth[cpu];
+ // Scan from top for matching return address
+ for(int i = (int)depth - 1; i >= 0; i--)
+ {
+  if(shadow_stack[cpu][i].return_addr == pr)
+  {
+   shadow_stack_depth[cpu] = (unsigned)i;
+   return;
+  }
+ }
+ // No match — complete desync, clear the stack
+ shadow_stack_depth[cpu] = 0;
+}
+
 // Automation: memory write watchpoint state.
 // Placed before scu.inc so both BusRW_DB_CS3, SCU DMA_Write, and BBusRW_DB can access.
 static bool automation_wp_active = false;
@@ -825,42 +865,33 @@ void Automation_DumpRegsBin(const char* path)
 // that look like return addresses (2-byte aligned, in known code regions).
 std::string Automation_CallStack(uint32 scan_size)
 {
- uint32 pc = CPU[0].PC;
- uint32 pr = CPU[0].PR;
- uint32 sp = CPU[0].R[15];
+ // Use automation_current_cpu if valid (0 or 1), default to master
+ unsigned cpu = (automation_current_cpu < 2) ? automation_current_cpu : 0;
+ uint32 pc = CPU[cpu].PC;
+ uint32 pr = CPU[cpu].PR;
+ uint32 sp = CPU[cpu].R[15];
 
  std::string s = "call_stack";
  char buf[128];
 
- snprintf(buf, sizeof(buf), " PC=0x%08X SP=0x%08X PR=0x%08X", pc, sp, pr);
+ snprintf(buf, sizeof(buf), " cpu=%s PC=0x%08X SP=0x%08X PR=0x%08X",
+  cpu ? "slave" : "master", pc, sp, pr);
  s += buf;
 
- // PR is the immediate return address
- if (pr != 0) {
-  snprintf(buf, sizeof(buf), " | PR->0x%08X", pr);
-  s += buf;
- }
-
- // Scan stack upward from SP for return addresses
- int count = 0;
- for (uint32 off = 0; off < scan_size; off += 4) {
-  uint32 val = ((uint32)Automation_ReadMem8(sp + off) << 24)
-             | ((uint32)Automation_ReadMem8(sp + off + 1) << 16)
-             | ((uint32)Automation_ReadMem8(sp + off + 2) << 8)
-             |  (uint32)Automation_ReadMem8(sp + off + 3);
-  if (val & 1) continue;  // SH-2: must be 2-byte aligned
-  const char* region = nullptr;
-  if (val < 0x00100000) region = "BIOS";
-  else if (val >= 0x00200000 && val < 0x00300000) region = "LWR";
-  else if (val >= 0x06000000 && val < 0x06100000) region = "HWR";
-  if (region) {
-   snprintf(buf, sizeof(buf), " | SP+0x%03X->0x%08X[%s]", off, val, region);
+ // Shadow call stack (tracked via jsr/bsr/bsrf/rts instrumentation)
+ unsigned depth = shadow_stack_depth[cpu];
+ if(depth > 0)
+ {
+  for(int i = (int)depth - 1; i >= 0; i--)
+  {
+   const ShadowCallEntry& e = shadow_stack[cpu][i];
+   snprintf(buf, sizeof(buf), " | 0x%08X->0x%08X ret=0x%08X",
+    e.call_site, e.target, e.return_addr);
    s += buf;
-   count++;
   }
  }
 
- snprintf(buf, sizeof(buf), " | total=%d", count);
+ snprintf(buf, sizeof(buf), " | depth=%u", depth);
  s += buf;
 
  return s;
