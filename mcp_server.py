@@ -11,6 +11,7 @@ All tools follow the same pattern:
 Game-agnostic. Game-specific helpers belong in the consuming project.
 """
 
+from __future__ import annotations
 import os
 import sys
 import re
@@ -57,6 +58,11 @@ _home_dir = None
 
 # Cheat-engine memory snapshots (name -> bytes)
 _memory_snapshots = {}
+
+# Track whether any break-producing instruments are active, so run_free
+# can auto-detect whether to wait for a break event.
+_break_sources = set()  # e.g. {"breakpoint", "watchpoint", "read_watchpoint", "exception"}
+_active_breakpoints = set()  # Individual breakpoint addresses (hex strings)
 
 
 def _send(cmd):
@@ -137,6 +143,8 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
         except subprocess.TimeoutExpired:
             _proc.kill()
 
+    _break_sources.clear()
+    _active_breakpoints.clear()
     cue = cue_path or _default_cue or ""
     if not cue:
         return "FAIL: No disc image. Pass cue_path or use --cue."
@@ -286,6 +294,8 @@ async def quit_emulator() -> str:
         except subprocess.TimeoutExpired:
             _proc.kill()
     _proc = None
+    _break_sources.clear()
+    _active_breakpoints.clear()
     return "OK"
 
 
@@ -496,6 +506,9 @@ async def breakpoint_set(address: str, log: bool = False) -> str:
     if log:
         cmd += " log"
     ack = await _send_and_wait(cmd, "ok breakpoint", timeout=5)
+    if ack and not log:
+        _active_breakpoints.add(addr)
+        _break_sources.add("breakpoint")
     return ack if ack else "FAIL: timed out"
 
 
@@ -506,6 +519,10 @@ async def breakpoint_remove(address: str) -> str:
         return "FAIL: No session"
     addr = _strip_hex(address)
     ack = await _send_and_wait(f"breakpoint_remove {addr}", "breakpoint_remove", timeout=5)
+    if ack:
+        _active_breakpoints.discard(addr)
+        if not _active_breakpoints:
+            _break_sources.discard("breakpoint")
     return ack if ack else "FAIL: timed out"
 
 
@@ -515,6 +532,9 @@ async def breakpoint_clear() -> str:
     if not _alive():
         return "FAIL: No session"
     ack = await _send_and_wait("breakpoint_clear", "breakpoint_clear", timeout=5)
+    if ack:
+        _active_breakpoints.clear()
+        _break_sources.discard("breakpoint")
     return ack if ack else "FAIL: timed out"
 
 
@@ -562,6 +582,8 @@ async def watchpoint_set(address: str, value: str = "", log: bool = False) -> st
     if log:
         cmd += " log"
     ack = await _send_and_wait(cmd, "ok watchpoint", timeout=5)
+    if ack and not log:
+        _break_sources.add("watchpoint")
     return ack if ack else "FAIL: timed out"
 
 
@@ -571,6 +593,8 @@ async def watchpoint_clear() -> str:
     if not _alive():
         return "FAIL: No session"
     ack = await _send_and_wait("watchpoint_clear", "ok watchpoint_clear", timeout=5)
+    if ack:
+        _break_sources.discard("watchpoint")
     return ack if ack else "FAIL: timed out"
 
 
@@ -623,6 +647,8 @@ async def read_watchpoint_set(address: str, log: bool = False) -> str:
     if log:
         cmd += " log"
     ack = await _send_and_wait(cmd, "ok read_watchpoint", timeout=5)
+    if ack and not log:
+        _break_sources.add("read_watchpoint")
     return ack if ack else "FAIL: timed out"
 
 
@@ -632,6 +658,8 @@ async def read_watchpoint_clear() -> str:
     if not _alive():
         return "FAIL: No session"
     ack = await _send_and_wait("read_watchpoint_clear", "ok read_watchpoint_clear", timeout=5)
+    if ack:
+        _break_sources.discard("read_watchpoint")
     return ack if ack else "FAIL: timed out"
 
 
@@ -682,6 +710,11 @@ async def exception_break(mode: str = "enable") -> str:
     if mode not in ("enable", "log", "disable"):
         return "FAIL: mode must be enable, log, or disable"
     ack = await _send_and_wait(f"exception_break {mode}", "ok exception_break", timeout=5)
+    if ack:
+        if mode == "enable":
+            _break_sources.add("exception")
+        else:
+            _break_sources.discard("exception")
     return ack if ack else "FAIL: timed out"
 
 
@@ -1131,13 +1164,16 @@ async def run_to_frame(frame: int) -> str:
 
 
 @mcp.tool()
-async def run_free(wait_for_break: bool = False, timeout: int = 300) -> str:
-    """Unpause emulator (free-run). If wait_for_break=True, block until a
-    breakpoint or watchpoint fires and return the enriched ack with regs + callstack."""
+async def run_free(wait_for_break: bool | None = None, timeout: int = 300) -> str:
+    """Unpause emulator (free-run). Automatically waits for a break event if
+    any breakpoints, watchpoints, or exception breaks are active. Pass
+    wait_for_break=False to override (e.g. letting the human play), or
+    wait_for_break=True to force waiting (e.g. after raw_command breakpoints)."""
     if not _alive():
         return "FAIL: No session"
     _send("run")  # No ack from C++ -- single-threaded, guaranteed to execute
-    if not wait_for_break:
+    should_wait = wait_for_break if wait_for_break is not None else bool(_break_sources)
+    if not should_wait:
         return "ok run"
     ack = await _wait_ack(["break ", "hit watchpoint", "hit read_watchpoint", "hit exception"], timeout=timeout)
     if ack and "hit exception" in ack:
