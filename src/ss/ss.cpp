@@ -203,6 +203,20 @@ static void ShadowStack_PopToReturn(unsigned cpu, uint32 pr)
  shadow_stack_depth[cpu] = 0;
 }
 
+// Write the shadow call chain for a CPU to a file, inline on one line.
+// Format: chain=target<-target<-target (innermost first, i.e. most recent callee)
+static void ShadowStack_FPrint(FILE* f, unsigned cpu)
+{
+ unsigned depth = shadow_stack_depth[cpu];
+ if(depth == 0) return;
+ fprintf(f, " chain=");
+ for(int i = (int)depth - 1; i >= 0; i--)
+ {
+  if(i < (int)depth - 1) fprintf(f, "<-");
+  fprintf(f, "0x%08X", shadow_stack[cpu][i].target);
+ }
+}
+
 // Automation: memory write watchpoint state.
 // Placed before scu.inc so both BusRW_DB_CS3, SCU DMA_Write, and BBusRW_DB can access.
 static bool automation_wp_active = false;
@@ -1135,7 +1149,7 @@ void Automation_EnableMemProfile(const char* path, uint32 lo, uint32 hi)
  memprofile_hi = hi & 0x0FFFFFFF;
  memprofile_file = fopen(path, "w");
  if(memprofile_file)
-  fprintf(memprofile_file, "# Mem write profile: 0x%08X-0x%08X\n# pc addr val sz\n",
+  fprintf(memprofile_file, "# Mem write profile: 0x%08X-0x%08X\n# pc addr val sz [chain=callee<-caller<-...]\n",
    lo, hi);
 }
 
@@ -1155,7 +1169,7 @@ void Automation_EnableMemReadProfile(const char* path, uint32 lo, uint32 hi)
  memreadprofile_hi = hi & 0x0FFFFFFF;
  memreadprofile_file = fopen(path, "w");
  if(memreadprofile_file)
-  fprintf(memreadprofile_file, "# Mem read profile: 0x%08X-0x%08X\n# pc pr addr sz\n",
+  fprintf(memreadprofile_file, "# Mem read profile: 0x%08X-0x%08X\n# pc pr addr sz [chain=callee<-caller<-...]\n",
    lo, hi);
 }
 

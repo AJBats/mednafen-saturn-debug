@@ -2640,7 +2640,11 @@ INLINE void SH7095::Cache_CheckReadIncoherency(CacheEntry* cent, const int way, 
  {														\
   uint32 mra = A & 0x0FFFFFFF;											\
   if(mra >= memreadprofile_lo && mra <= memreadprofile_hi)							\
-   fprintf(memreadprofile_file, "pc=0x%08X pr=0x%08X addr=0x%08X sz=%zu\n", PC, PR, A, sizeof(T));	\
+  {														\
+   fprintf(memreadprofile_file, "pc=0x%08X pr=0x%08X addr=0x%08X sz=%zu", PC, PR, A, sizeof(T));	\
+   ShadowStack_FPrint(memreadprofile_file, which);								\
+   fprintf(memreadprofile_file, "\n");										\
+  }														\
  }														\
 														\
  switch(region)													\
@@ -2782,8 +2786,12 @@ INLINE void SH7095::Cache_CheckReadIncoherency(CacheEntry* cent, const int way, 
  {										\
   uint32 mpa = A & 0x0FFFFFFF;							\
   if(mpa >= memprofile_lo && mpa <= memprofile_hi)				\
-   fprintf(memprofile_file, "pc=0x%08X addr=0x%08X val=0x%X sz=%zu\n",	\
-    PC, A, (uint32)V, sizeof(T));						\
+  {									\
+   fprintf(memprofile_file, "pc=0x%08X addr=0x%08X val=0x%X sz=%zu",	\
+    PC, A, (uint32)V, sizeof(T));					\
+   ShadowStack_FPrint(memprofile_file, which);				\
+   fprintf(memprofile_file, "\n");					\
+  }									\
  }										\
 										\
  switch(region)									\
