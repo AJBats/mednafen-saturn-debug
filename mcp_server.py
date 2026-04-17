@@ -547,6 +547,184 @@ async def breakpoint_list() -> str:
     return ack if ack else "FAIL: timed out"
 
 
+# ---------------------------------------------------------------------------
+# Poke triggers: write memory on breakpoint hit, continue without pausing.
+# Enables auto-replay of captured car-struct (or any memory region) state
+# at PC-aligned moments in each frame, driven by a CSV of per-frame values.
+# ---------------------------------------------------------------------------
+
+def _parse_width(w):
+    w = int(w)
+    if w not in (8, 16, 32):
+        raise ValueError(f"width must be 8/16/32, got {w}")
+    return w
+
+
+@mcp.tool()
+async def poke_breakpoint_set(trigger_pc: str, pokes: list[dict]) -> str:
+    """Install a PC-triggered poke: on every hit at trigger_pc, write the given
+    list of memory values atomically and continue without pausing.
+
+    pokes is a list of dicts: {addr: hex, value: int|hex, width: 8|16|32}.
+    Example: pokes=[{"addr": "0x0605224C", "value": 0x008CF8D0, "width": 32}]
+
+    Replaces any existing trigger at trigger_pc (static or playback)."""
+    if not _alive():
+        return "FAIL: No session"
+    if not pokes:
+        return "FAIL: pokes list is empty"
+    tpc = _strip_hex(trigger_pc)
+    parts = [f"poke_breakpoint {tpc} {len(pokes)}"]
+    for p in pokes:
+        addr = _strip_hex(str(p["addr"]))
+        v = p["value"]
+        vhex = _strip_hex(v) if isinstance(v, str) else f"{int(v):X}"
+        w = _parse_width(p["width"])
+        parts.append(f"{addr}:{vhex}:{w}")
+    ack = await _send_and_wait(" ".join(parts),
+                               ["ok poke_breakpoint", "error poke_breakpoint", "error unknown command"],
+                               timeout=5)
+    if ack and ack.startswith("ok poke_breakpoint"):
+        _break_sources.add("poke_trigger")
+    return ack if ack else "FAIL: timed out"
+
+
+@mcp.tool()
+async def poke_breakpoint_remove(trigger_pc: str) -> str:
+    """Remove one poke trigger by PC. If this leaves no triggers, run_free
+    will no longer auto-wait for poke-related breaks."""
+    if not _alive():
+        return "FAIL: No session"
+    tpc = _strip_hex(trigger_pc)
+    ack = await _send_and_wait(f"poke_breakpoint_remove {tpc}",
+                               ["ok poke_breakpoint_remove", "error poke_breakpoint_remove", "error unknown command"],
+                               timeout=5)
+    # Ack includes "total_triggers=N" — discard the break source when N==0
+    # so the next run_free doesn't block on a break that can't happen.
+    if ack and "total_triggers=0" in ack:
+        _break_sources.discard("poke_trigger")
+    return ack if ack else "FAIL: timed out"
+
+
+@mcp.tool()
+async def poke_breakpoint_clear() -> str:
+    """Remove all poke triggers (static and playback)."""
+    if not _alive():
+        return "FAIL: No session"
+    ack = await _send_and_wait("poke_breakpoint_clear",
+                               ["ok poke_breakpoint_clear", "error unknown command"], timeout=5)
+    if ack and ack.startswith("ok"):
+        _break_sources.discard("poke_trigger")
+    return ack if ack else "FAIL: timed out"
+
+
+@mcp.tool()
+async def poke_breakpoint_list() -> str:
+    """List active poke triggers (static + playback, with hit counters)."""
+    if not _alive():
+        return "FAIL: No session"
+    ack = await _send_and_wait("poke_breakpoint_list",
+                               ["poke_triggers", "error unknown command"], timeout=5)
+    return ack if ack else "FAIL: timed out"
+
+
+@mcp.tool()
+async def poke_playback_start(trigger_pc: str, base_addr: str, csv_path: str,
+                              columns: list[dict], start_row: int = 0,
+                              end_row: int = -1, on_end: str = "hold") -> str:
+    """Drive memory writes from a CSV, one row per hit at trigger_pc.
+
+    Typical use: replay per-frame car-struct captures at a once-per-frame PC
+    in a transplant build so downstream rendering sees retail-like values.
+
+    Args:
+      trigger_pc: hex PC, e.g. "0x06028002". Pokes fire right before this
+                  instruction executes.
+      base_addr:  hex base address the column offsets are relative to
+                  (e.g. "0x0605224C" for car[0]).
+      csv_path:   absolute path to the CSV. Format is the one produced by
+                  sample_memory + tools/blob_to_csv.py: header row with
+                  "+0xNN" offset names, data rows with 0xHHHHHHHH cells.
+                  Must be resolvable from Mednafen's working directory
+                  (use forward slashes). No spaces in the path.
+      columns:    list of dicts. Each entry:
+                    {csv_column: "+0x00", offset: 0x00, width: 32}
+                    {csv_column: "+0x0C", offset: 0x0E, width: 16,
+                     byte_slice: [2, 4]}   # low 16 of a BE32 cell
+      start_row:  first CSV data row to play (default 0)
+      end_row:    one past last row; -1 means EOF (default)
+      on_end:     "halt" (pause + ack), "loop" (wrap to start_row),
+                  "hold" (freeze on last row, keep poking)
+
+    Replaces any existing trigger at trigger_pc. Only one playback cursor at
+    a time — starting a new one supersedes the old.
+
+    After this, call run_free(wait_for_break=True) to drive the emulator
+    until the playback halts (if on_end="halt") or until another break fires.
+
+    Note on save states: poke trigger state lives outside Mednafen's save-state
+    system. If you save_state during playback and load_state later, the cursor
+    keeps its current position rather than rewinding to the saved moment.
+    For reproducible runs, call poke_playback_start fresh after load_state."""
+    if not _alive():
+        return "FAIL: No session"
+    if not columns:
+        return "FAIL: columns list is empty"
+    if on_end not in ("halt", "loop", "hold"):
+        return f"FAIL: on_end must be halt|loop|hold, got {on_end}"
+    tpc  = _strip_hex(trigger_pc)
+    base = _strip_hex(base_addr)
+    parts = [f"poke_playback_start {tpc} {base} {int(start_row)} {int(end_row)} {on_end} {len(columns)}"]
+    for col in columns:
+        name = str(col["csv_column"])
+        if ":" in name or " " in name:
+            return f"FAIL: csv_column name cannot contain ':' or spaces (got {name!r})"
+        off = _strip_hex(str(col["offset"])) if isinstance(col["offset"], str) else f"{int(col['offset']):X}"
+        w   = _parse_width(col["width"])
+        spec = f"{name}:{off}:{w}"
+        if "byte_slice" in col and col["byte_slice"] is not None:
+            lo, hi = col["byte_slice"]
+            spec += f":{int(lo)}:{int(hi)}"
+        parts.append(spec)
+    parts.append(wsl_path(csv_path))
+    ack = await _send_and_wait(" ".join(parts),
+                               ["ok poke_playback_start", "error poke_playback_start", "error unknown command"],
+                               timeout=30)
+    if ack and ack.startswith("ok poke_playback_start"):
+        _break_sources.add("poke_trigger")
+    return ack if ack else "FAIL: timed out"
+
+
+@mcp.tool()
+async def poke_playback_stop() -> str:
+    """Stop CSV playback and remove its trigger."""
+    if not _alive():
+        return "FAIL: No session"
+    ack = await _send_and_wait("poke_playback_stop",
+                               ["ok poke_playback_stop", "error unknown command"], timeout=5)
+    if ack and ack.startswith("ok"):
+        # Conservative: only safe when playback was the sole trigger. Users with
+        # remaining static triggers should re-arm via poke_breakpoint_set.
+        _break_sources.discard("poke_trigger")
+    return ack if ack else "FAIL: timed out"
+
+
+@mcp.tool()
+async def poke_playback_status() -> str:
+    """Report CSV playback state: row cursor, triggers_seen, pokes, done flag.
+    Use triggers_seen to validate the trigger PC — if it's zero after
+    running for a while, the PC was never reached (wrong address)."""
+    if not _alive():
+        return "FAIL: No session"
+    # "poke_playback" alone is too loose — it also matches stale acks like
+    # "error unknown command: poke_playback_start". Anchor on the two legitimate
+    # status prefixes plus the unknown-command fallthrough.
+    ack = await _send_and_wait("poke_playback_status",
+                               ["poke_playback pc=", "poke_playback inactive", "error unknown command"],
+                               timeout=5)
+    return ack if ack else "FAIL: timed out"
+
+
 @mcp.tool()
 async def step(count: int = 1) -> str:
     """Execute N CPU instructions (step into). Default 1."""
@@ -1175,7 +1353,7 @@ async def run_free(wait_for_break: bool | None = None, timeout: int = 300) -> st
     should_wait = wait_for_break if wait_for_break is not None else bool(_break_sources)
     if not should_wait:
         return "ok run"
-    ack = await _wait_ack(["break ", "hit watchpoint", "hit read_watchpoint", "hit exception"], timeout=timeout)
+    ack = await _wait_ack(["break ", "hit watchpoint", "hit read_watchpoint", "hit exception", "done poke_playback"], timeout=timeout)
     if ack and "hit exception" in ack:
         return f"EXCEPTION: {ack}"
     return ack if ack else f"TIMEOUT: no break event within {timeout}s"

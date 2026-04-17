@@ -33,6 +33,23 @@
  *   breakpoint_remove <addr>   - Remove specific PC breakpoint
  *   breakpoint_clear           - Remove all breakpoints
  *   breakpoint_list            - List active breakpoints
+ *   poke_breakpoint <trigger_pc> <n> <addr>:<val>:<width> ...
+ *                              - On each hit at trigger_pc, write <n> pokes (atomic)
+ *                                and continue without pausing. width is bits (8/16/32).
+ *   poke_breakpoint_remove <trigger_pc> - Remove one poke trigger
+ *   poke_breakpoint_clear      - Remove all poke triggers + any playback
+ *   poke_breakpoint_list       - List all poke triggers
+ *   poke_playback_start <trigger_pc> <base_addr> <start_row> <end_row> <on_end>
+ *                       <n_cols> <col1> ... <colN> <csv_path>
+ *                              - CSV-driven playback: each hit pokes one row's worth
+ *                                of columns at base_addr+offset, then advances.
+ *                                on_end: halt|loop|hold. end_row=-1 means EOF.
+ *                                col spec: <csv_name>:<offset_hex>:<width>[:<slice_lo>:<slice_hi>]
+ *                                csv_name matches the header cell (no spaces in name).
+ *                                byte_slice extracts bytes [lo..hi) from a BE32 render of
+ *                                the cell (for narrow fields packed inside a wider column).
+ *   poke_playback_stop         - Stop playback and remove its trigger
+ *   poke_playback_status       - Report row cursor, trigger hits, poke count
  *   call_trace <path>          - Start logging JSR/BSR/BSRF calls to text file
  *   call_trace_stop            - Stop call trace logging
  *   unified_trace <path>       - Combined call trace + CD Block events
@@ -99,6 +116,7 @@
 #include <string>
 #include <vector>
 #include <unordered_set>
+#include <unordered_map>
 #include <fstream>
 #include "../MemoryStream.h"
 #include "../compress/GZFileStream.h"
@@ -230,6 +248,58 @@ static FILE* exc_log = nullptr;
 static bool breakpoint_log_mode = false;  // true = log-only (no pause) for ALL breakpoints
 static FILE* bp_log = nullptr;
 
+// Poke triggers: on hit at trigger PC, write memory then continue without pausing.
+// Each entry is either a static poke list, or a CSV-driven playback that advances
+// one row per hit. Writes go through Automation_WriteMem8 (same as the `poke`
+// command) and are atomic within a single hit — no SH-2 cycles intervene.
+struct PokeOp {
+ uint32_t addr;
+ uint32_t value;
+ uint8_t  width;  // bits: 8, 16, or 32
+};
+
+struct PokePlaybackCol {
+ uint32_t offset;        // byte offset from base_addr
+ uint8_t  width;         // bits: 8, 16, or 32
+ size_t   csv_col_idx;   // column index in parsed CSV row
+ bool     slice_enabled;
+ int      slice_lo;      // inclusive byte index into BE32 source
+ int      slice_hi;      // exclusive
+};
+
+enum PokePlaybackOnEnd { PPOE_HALT, PPOE_LOOP, PPOE_HOLD };
+
+struct PokeTrigger {
+ bool is_playback = false;
+
+ // Static mode
+ std::vector<PokeOp> static_pokes;
+
+ // Playback mode
+ uint32_t                              base_addr   = 0;
+ std::vector<PokePlaybackCol>          columns;
+ // rows[row_idx][col_idx] = pre-computed bytes to write.
+ std::vector<std::vector<std::vector<uint8_t>>> rows;
+ size_t                                start_row   = 0;
+ size_t                                end_row     = 0;   // exclusive
+ size_t                                cur_row     = 0;
+ PokePlaybackOnEnd                     on_end      = PPOE_HOLD;
+ bool                                  done        = false; // halt fired, no more pokes
+
+ // Diagnostics
+ uint64_t trigger_hits    = 0;
+ uint64_t pokes_performed = 0;
+};
+
+static std::unordered_map<uint32_t, PokeTrigger> poke_triggers;
+// One playback trigger at a time (single cursor). Tracked so stop/status can find it.
+static bool     poke_playback_running = false;
+static uint32_t poke_playback_pc = 0;
+// Set by the hit callback when on_end=halt fires; consumed by Automation_DebugHook
+// to pause execution and emit a "done poke_playback" ack.
+static bool     poke_playback_halt_pending = false;
+static uint32_t poke_playback_halt_pc = 0;
+
 // Input trace state -- logs real keyboard input changes with frame numbers
 static FILE* input_trace_file = nullptr;
 static uint16_t last_traced_input = 0;
@@ -281,7 +351,7 @@ static void update_cpu_hook(void)
 {
  // Watchpoints don't need the CPU hook -- they're detected inline in BusRW_DB_CS3
  bool need = pc_trace_active || (instructions_to_step >= 0) || !breakpoints.empty()
-          || (run_to_cycle_target >= 0);
+          || (run_to_cycle_target >= 0) || !poke_triggers.empty();
  if (need && !cpu_hook_active) {
   MDFN_IEN_SS::Automation_EnableCPUHook();
   cpu_hook_active = true;
@@ -1219,6 +1289,362 @@ static void process_command(const std::string& line)
    write_ack("ok mem_sample_stop (not active)");
   }
  }
+ else if (cmd == "poke_breakpoint") {
+  // poke_breakpoint <trigger_pc_hex> <n_pokes> <addr_hex>:<val_hex>:<width> ...
+  // Each hit at trigger_pc writes all pokes (atomic, no intervening cycles)
+  // and continues without pausing. Replaces any existing trigger at that PC.
+  uint32_t tpc = 0;
+  int n_pokes = 0;
+  iss >> std::hex >> tpc;
+  iss >> std::dec >> n_pokes;
+  if (n_pokes < 1 || n_pokes > 64) {
+   write_ack("error poke_breakpoint: n_pokes out of range (1..64)");
+   return;
+  }
+  std::vector<PokeOp> pokes;
+  pokes.reserve(n_pokes);
+  for (int i = 0; i < n_pokes; i++) {
+   std::string spec;
+   if (!(iss >> spec)) {
+    write_ack("error poke_breakpoint: missing poke spec");
+    return;
+   }
+   // Split spec on ':'
+   size_t c1 = spec.find(':');
+   size_t c2 = (c1 == std::string::npos) ? std::string::npos : spec.find(':', c1 + 1);
+   if (c1 == std::string::npos || c2 == std::string::npos) {
+    write_ack("error poke_breakpoint: bad spec (need addr:val:width): " + spec);
+    return;
+   }
+   PokeOp p;
+   try {
+    p.addr  = (uint32_t)std::stoul(spec.substr(0, c1), nullptr, 16);
+    p.value = (uint32_t)std::stoul(spec.substr(c1 + 1, c2 - c1 - 1), nullptr, 16);
+    int w   = std::stoi(spec.substr(c2 + 1));
+    if (w != 8 && w != 16 && w != 32) {
+     write_ack("error poke_breakpoint: width must be 8/16/32");
+     return;
+    }
+    p.width = (uint8_t)w;
+   } catch (...) {
+    write_ack("error poke_breakpoint: parse error in spec: " + spec);
+    return;
+   }
+   pokes.push_back(p);
+  }
+  // If a playback was active at this PC, it's being replaced — clear flags.
+  auto existing = poke_triggers.find(tpc);
+  if (existing != poke_triggers.end() && existing->second.is_playback) {
+   if (poke_playback_running && poke_playback_pc == tpc) {
+    poke_playback_running = false;
+    poke_playback_pc = 0;
+   }
+  }
+  PokeTrigger trig;
+  trig.is_playback     = false;
+  trig.static_pokes    = std::move(pokes);
+  trig.trigger_hits    = 0;
+  trig.pokes_performed = 0;
+  poke_triggers[tpc]   = std::move(trig);
+  update_cpu_hook();
+  char buf[128];
+  snprintf(buf, sizeof(buf), "ok poke_breakpoint 0x%08X pokes=%d total_triggers=%zu",
+           tpc, n_pokes, poke_triggers.size());
+  write_ack(buf);
+ }
+ else if (cmd == "poke_breakpoint_remove") {
+  uint32_t tpc = 0;
+  iss >> std::hex >> tpc;
+  auto it = poke_triggers.find(tpc);
+  if (it == poke_triggers.end()) {
+   char buf[64];
+   snprintf(buf, sizeof(buf), "error poke_breakpoint_remove: not found 0x%08X", tpc);
+   write_ack(buf);
+   return;
+  }
+  if (it->second.is_playback && poke_playback_running && poke_playback_pc == tpc) {
+   poke_playback_running = false;
+   poke_playback_pc = 0;
+  }
+  poke_triggers.erase(it);
+  update_cpu_hook();
+  char buf[128];
+  snprintf(buf, sizeof(buf), "ok poke_breakpoint_remove 0x%08X total_triggers=%zu",
+           tpc, poke_triggers.size());
+  write_ack(buf);
+ }
+ else if (cmd == "poke_breakpoint_clear") {
+  size_t count = poke_triggers.size();
+  poke_triggers.clear();
+  poke_playback_running = false;
+  poke_playback_pc = 0;
+  poke_playback_halt_pending = false;
+  update_cpu_hook();
+  write_ack("ok poke_breakpoint_clear removed=" + std::to_string(count));
+ }
+ else if (cmd == "poke_breakpoint_list") {
+  std::ostringstream ss;
+  ss << "poke_triggers count=" << poke_triggers.size();
+  for (const auto& kv : poke_triggers) {
+   char buf[128];
+   if (kv.second.is_playback) {
+    snprintf(buf, sizeof(buf), " 0x%08X=playback(rows=%zu,cur=%zu,hits=%llu)",
+             kv.first, kv.second.rows.size(), kv.second.cur_row,
+             (unsigned long long)kv.second.trigger_hits);
+   } else {
+    snprintf(buf, sizeof(buf), " 0x%08X=static(pokes=%zu,hits=%llu)",
+             kv.first, kv.second.static_pokes.size(),
+             (unsigned long long)kv.second.trigger_hits);
+   }
+   ss << buf;
+  }
+  write_ack(ss.str());
+ }
+ else if (cmd == "poke_playback_start") {
+  // poke_playback_start <trigger_pc> <base_addr> <start_row> <end_row>
+  //                     <on_end> <n_cols> <col1> ... <colN> <csv_path>
+  // Each col: <csv_name>:<offset_hex>:<width>[:<slice_lo>:<slice_hi>]
+  // on_end: halt|loop|hold
+  // end_row=-1 means EOF. Replaces any existing trigger at that PC, and
+  // supersedes any prior playback (only one playback cursor at a time).
+  uint32_t tpc = 0, base = 0;
+  int64_t  start_row_in = 0, end_row_in = -1;
+  std::string on_end_str;
+  int n_cols = 0;
+  iss >> std::hex >> tpc >> base;
+  iss >> std::dec >> start_row_in >> end_row_in >> on_end_str >> n_cols;
+  if (n_cols < 1 || n_cols > 256) {
+   write_ack("error poke_playback_start: n_cols out of range (1..256)");
+   return;
+  }
+  PokePlaybackOnEnd on_end;
+  if      (on_end_str == "halt") on_end = PPOE_HALT;
+  else if (on_end_str == "loop") on_end = PPOE_LOOP;
+  else if (on_end_str == "hold") on_end = PPOE_HOLD;
+  else {
+   write_ack("error poke_playback_start: on_end must be halt|loop|hold");
+   return;
+  }
+  // Parse column specs
+  std::vector<std::string>        col_names(n_cols);
+  std::vector<PokePlaybackCol>    cols(n_cols);
+  for (int i = 0; i < n_cols; i++) {
+   std::string spec;
+   if (!(iss >> spec)) {
+    write_ack("error poke_playback_start: missing column spec");
+    return;
+   }
+   // Split on ':' into up to 5 parts: name, offset, width, [slice_lo, slice_hi]
+   std::vector<std::string> parts;
+   size_t start = 0;
+   while (true) {
+    size_t pos = spec.find(':', start);
+    if (pos == std::string::npos) { parts.push_back(spec.substr(start)); break; }
+    parts.push_back(spec.substr(start, pos - start));
+    start = pos + 1;
+   }
+   if (parts.size() != 3 && parts.size() != 5) {
+    write_ack("error poke_playback_start: column spec must be name:offset:width[:lo:hi] — got " + spec);
+    return;
+   }
+   try {
+    col_names[i]          = parts[0];
+    cols[i].offset        = (uint32_t)std::stoul(parts[1], nullptr, 16);
+    int w                 = std::stoi(parts[2]);
+    if (w != 8 && w != 16 && w != 32) {
+     write_ack("error poke_playback_start: width must be 8/16/32");
+     return;
+    }
+    cols[i].width         = (uint8_t)w;
+    cols[i].slice_enabled = (parts.size() == 5);
+    if (cols[i].slice_enabled) {
+     cols[i].slice_lo = std::stoi(parts[3]);
+     cols[i].slice_hi = std::stoi(parts[4]);
+     if (cols[i].slice_lo < 0 || cols[i].slice_hi > 4
+         || cols[i].slice_lo >= cols[i].slice_hi
+         || (cols[i].slice_hi - cols[i].slice_lo) * 8 != w) {
+      write_ack("error poke_playback_start: bad byte_slice (must be within [0,4] and match width)");
+      return;
+     }
+    } else {
+     cols[i].slice_lo = cols[i].slice_hi = 0;
+    }
+    cols[i].csv_col_idx   = 0; // filled in after header parse
+   } catch (...) {
+    write_ack("error poke_playback_start: parse error in col spec: " + spec);
+    return;
+   }
+  }
+  // Rest of line is the CSV path (single token, no spaces supported)
+  std::string csv_path;
+  iss >> csv_path;
+  if (csv_path.empty()) {
+   write_ack("error poke_playback_start: missing csv_path");
+   return;
+  }
+  std::ifstream cf(csv_path);
+  if (!cf.is_open()) {
+   write_ack("error poke_playback_start: cannot open CSV " + csv_path);
+   return;
+  }
+  // Parse header
+  std::string line;
+  if (!std::getline(cf, line)) {
+   write_ack("error poke_playback_start: empty CSV");
+   return;
+  }
+  auto split_csv = [](const std::string& s, std::vector<std::string>& out) {
+   out.clear();
+   std::string tok;
+   for (size_t i = 0; i < s.size(); i++) {
+    char ch = s[i];
+    if (ch == ',') { out.push_back(tok); tok.clear(); }
+    else if (ch != '\r' && ch != '\n') tok.push_back(ch);
+   }
+   out.push_back(tok);
+  };
+  std::vector<std::string> headers;
+  split_csv(line, headers);
+  // Resolve each requested name to a header index
+  for (int i = 0; i < n_cols; i++) {
+   bool found = false;
+   for (size_t j = 0; j < headers.size(); j++) {
+    if (headers[j] == col_names[i]) { cols[i].csv_col_idx = j; found = true; break; }
+   }
+   if (!found) {
+    write_ack("error poke_playback_start: column '" + col_names[i] + "' not in CSV header");
+    return;
+   }
+  }
+  // Parse all data rows, pre-compute bytes for each (row, col)
+  std::vector<std::vector<std::vector<uint8_t>>> rows;
+  while (std::getline(cf, line)) {
+   if (line.empty()) continue;
+   if (line[0] == '#') continue;
+   std::vector<std::string> cells;
+   split_csv(line, cells);
+   std::vector<std::vector<uint8_t>> row_bytes(n_cols);
+   for (int c = 0; c < n_cols; c++) {
+    if (cols[c].csv_col_idx >= cells.size()) {
+     char buf[160];
+     snprintf(buf, sizeof(buf),
+              "error poke_playback_start: row %zu has %zu cols, col index %zu out of range",
+              rows.size(), cells.size(), cols[c].csv_col_idx);
+     write_ack(buf);
+     return;
+    }
+    const std::string& cell = cells[cols[c].csv_col_idx];
+    std::string s = cell;
+    if (s.size() >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s = s.substr(2);
+    uint64_t val;
+    try {
+     val = std::stoull(s, nullptr, 16);
+    } catch (...) {
+     write_ack("error poke_playback_start: bad hex cell '" + cell + "'");
+     return;
+    }
+    // Render as big-endian 4 bytes (source assumed 32-bit hex column)
+    uint8_t be4[4] = {
+     (uint8_t)((val >> 24) & 0xFF),
+     (uint8_t)((val >> 16) & 0xFF),
+     (uint8_t)((val >>  8) & 0xFF),
+     (uint8_t)(val         & 0xFF)
+    };
+    std::vector<uint8_t> bytes;
+    if (cols[c].slice_enabled) {
+     for (int b = cols[c].slice_lo; b < cols[c].slice_hi; b++) bytes.push_back(be4[b]);
+    } else {
+     // Take low (width/8) bytes in BE order
+     int n = cols[c].width / 8;
+     for (int b = 4 - n; b < 4; b++) bytes.push_back(be4[b]);
+    }
+    row_bytes[c] = std::move(bytes);
+   }
+   rows.push_back(std::move(row_bytes));
+  }
+  cf.close();
+  if (rows.empty()) {
+   write_ack("error poke_playback_start: CSV has no data rows");
+   return;
+  }
+  // Resolve row bounds
+  size_t start_row = (start_row_in < 0) ? 0 : (size_t)start_row_in;
+  size_t end_row   = (end_row_in   < 0) ? rows.size() : (size_t)end_row_in;
+  if (start_row >= rows.size() || end_row > rows.size() || start_row >= end_row) {
+   char buf[160];
+   snprintf(buf, sizeof(buf),
+            "error poke_playback_start: bad row range start=%zu end=%zu total=%zu",
+            start_row, end_row, rows.size());
+   write_ack(buf);
+   return;
+  }
+  // Supersede any prior playback
+  if (poke_playback_running) {
+   poke_triggers.erase(poke_playback_pc);
+   poke_playback_running = false;
+  }
+  PokeTrigger trig;
+  trig.is_playback     = true;
+  trig.base_addr       = base;
+  trig.columns         = std::move(cols);
+  trig.rows            = std::move(rows);
+  trig.start_row       = start_row;
+  trig.end_row         = end_row;
+  trig.cur_row         = start_row;
+  trig.on_end          = on_end;
+  trig.done            = false;
+  trig.trigger_hits    = 0;
+  trig.pokes_performed = 0;
+  poke_triggers[tpc]   = std::move(trig);
+  poke_playback_running = true;
+  poke_playback_pc      = tpc;
+  poke_playback_halt_pending = false;
+  update_cpu_hook();
+  char buf[192];
+  snprintf(buf, sizeof(buf),
+           "ok poke_playback_start 0x%08X base=0x%08X rows=%zu..%zu cols=%d on_end=%s",
+           tpc, base, start_row, end_row, n_cols, on_end_str.c_str());
+  write_ack(buf);
+ }
+ else if (cmd == "poke_playback_stop") {
+  if (!poke_playback_running) {
+   write_ack("ok poke_playback_stop (not active)");
+   return;
+  }
+  uint32_t tpc = poke_playback_pc;
+  poke_triggers.erase(tpc);
+  poke_playback_running = false;
+  poke_playback_pc = 0;
+  poke_playback_halt_pending = false;
+  update_cpu_hook();
+  char buf[96];
+  snprintf(buf, sizeof(buf), "ok poke_playback_stop 0x%08X", tpc);
+  write_ack(buf);
+ }
+ else if (cmd == "poke_playback_status") {
+  if (!poke_playback_running) {
+   write_ack("poke_playback inactive");
+   return;
+  }
+  auto it = poke_triggers.find(poke_playback_pc);
+  if (it == poke_triggers.end() || !it->second.is_playback) {
+   write_ack("poke_playback inactive (stale)");
+   return;
+  }
+  const auto& t = it->second;
+  char buf[256];
+  snprintf(buf, sizeof(buf),
+           "poke_playback pc=0x%08X base=0x%08X row=%zu/%zu start=%zu end=%zu "
+           "triggers_seen=%llu pokes=%llu done=%s on_end=%s",
+           poke_playback_pc, t.base_addr, t.cur_row, t.end_row,
+           t.start_row, t.end_row,
+           (unsigned long long)t.trigger_hits,
+           (unsigned long long)t.pokes_performed,
+           t.done ? "true" : "false",
+           (t.on_end == PPOE_HALT) ? "halt" :
+           (t.on_end == PPOE_LOOP) ? "loop" : "hold");
+  write_ack(buf);
+ }
  else {
   write_ack("error unknown command: " + cmd);
  }
@@ -1423,6 +1849,10 @@ void Automation_Kill(void)
  if (rwp_log) { fclose(rwp_log); rwp_log = nullptr; }
  if (bp_log) { fclose(bp_log); bp_log = nullptr; }
  if (exc_log) { fclose(exc_log); exc_log = nullptr; }
+ poke_triggers.clear();
+ poke_playback_running = false;
+ poke_playback_pc = 0;
+ poke_playback_halt_pending = false;
  if (unified_trace_file) { fclose(unified_trace_file); unified_trace_file = nullptr; }
  if (pc_trace_file) { fclose(pc_trace_file); pc_trace_file = nullptr; }
  if (input_trace_file) { fclose(input_trace_file); input_trace_file = nullptr; }
@@ -1732,11 +2162,84 @@ void Automation_ExceptionHit(unsigned exnum, unsigned vecnum, uint32_t pc, uint3
  }
 }
 
+// Execute all pokes configured for this trigger. For static triggers, writes
+// the fixed list. For playback triggers, writes the current row's bytes and
+// advances the row cursor (honoring on_end: halt/loop/hold).
+// Runs fully inside the debug hook -- no SH-2 cycles intervene between writes.
+static void perform_pokes_from_trigger(PokeTrigger& trig, uint32_t trigger_pc)
+{
+ trig.trigger_hits++;
+
+ if (!trig.is_playback) {
+  for (const auto& p : trig.static_pokes) {
+   if (p.width == 8) {
+    MDFN_IEN_SS::Automation_WriteMem8(p.addr, (uint8_t)(p.value & 0xFF));
+   } else if (p.width == 16) {
+    MDFN_IEN_SS::Automation_WriteMem8(p.addr,     (uint8_t)((p.value >> 8) & 0xFF));
+    MDFN_IEN_SS::Automation_WriteMem8(p.addr + 1, (uint8_t)(p.value & 0xFF));
+   } else { // 32
+    MDFN_IEN_SS::Automation_WriteMem8(p.addr,     (uint8_t)((p.value >> 24) & 0xFF));
+    MDFN_IEN_SS::Automation_WriteMem8(p.addr + 1, (uint8_t)((p.value >> 16) & 0xFF));
+    MDFN_IEN_SS::Automation_WriteMem8(p.addr + 2, (uint8_t)((p.value >>  8) & 0xFF));
+    MDFN_IEN_SS::Automation_WriteMem8(p.addr + 3, (uint8_t)(p.value & 0xFF));
+   }
+   trig.pokes_performed++;
+  }
+  return;
+ }
+
+ // Playback mode
+ if (trig.done) return;
+ if (trig.cur_row >= trig.end_row || trig.cur_row >= trig.rows.size()) return;
+
+ const auto& row = trig.rows[trig.cur_row];
+ for (size_t c = 0; c < trig.columns.size(); c++) {
+  const auto& col   = trig.columns[c];
+  const auto& bytes = row[c];
+  uint32_t dst = trig.base_addr + col.offset;
+  for (size_t i = 0; i < bytes.size(); i++)
+   MDFN_IEN_SS::Automation_WriteMem8(dst + i, bytes[i]);
+  trig.pokes_performed++;
+ }
+
+ // Advance cursor for the next hit.
+ if (trig.cur_row + 1 >= trig.end_row) {
+  if (trig.on_end == PPOE_LOOP) {
+   trig.cur_row = trig.start_row;
+  } else if (trig.on_end == PPOE_HOLD) {
+   // Stay on last valid row -- next hit re-pokes the same values
+  } else { // PPOE_HALT
+   // Park the cursor at end_row (past-the-end) so status reads
+   // "row=end/end done=true" unambiguously instead of "end-1/end".
+   trig.cur_row = trig.end_row;
+   trig.done    = true;
+   poke_playback_halt_pending = true;
+   poke_playback_halt_pc      = trigger_pc;
+  }
+ } else {
+  trig.cur_row++;
+ }
+}
+
 bool Automation_DebugHook(uint32_t pc)
 {
  // PC trace -- record every instruction's PC to file
  if (pc_trace_active && pc_trace_file) {
   fwrite(&pc, 4, 1, pc_trace_file);
+ }
+
+ // Poke triggers fire before any pause logic -- they write memory and
+ // continue. Same pc/pc-2 fallback as breakpoints (delayed-branch pipeline
+ // quirk: PC arrives as target+2 after JSR/BSR/JMP).
+ if (!poke_triggers.empty()) {
+  auto it = poke_triggers.find(pc);
+  uint32_t poke_tpc = pc;
+  if (it == poke_triggers.end()) {
+   auto it2 = poke_triggers.find(pc - 2);
+   if (it2 != poke_triggers.end()) { it = it2; poke_tpc = pc - 2; }
+  }
+  if (it != poke_triggers.end())
+   perform_pokes_from_trigger(it->second, poke_tpc);
  }
 
  // Check breakpoints (O(1) lookup via unordered_set)
@@ -1763,8 +2266,13 @@ bool Automation_DebugHook(uint32_t pc)
  if (instructions_to_step > 0)
   instructions_to_step--;
 
+ // Poke playback halt: consumed once, treated as a pause source
+ bool poke_halt = poke_playback_halt_pending;
+ uint32_t poke_halt_pc_local = poke_playback_halt_pc;
+ if (poke_halt) poke_playback_halt_pending = false;
+
  // Determine if we should pause
- bool should_pause = bp_hit || cycle_hit || (instructions_to_step == 0);
+ bool should_pause = bp_hit || cycle_hit || (instructions_to_step == 0) || poke_halt;
  if (!should_pause)
   return false;
 
@@ -1806,6 +2314,9 @@ bool Automation_DebugHook(uint32_t pc)
  else if (cycle_hit)
   snprintf(msg, sizeof(msg), "done run_to_cycle pc=0x%08X frame=%llu",
    real_pc, (unsigned long long)frame_counter);
+ else if (poke_halt)
+  snprintf(msg, sizeof(msg), "done poke_playback pc=0x%08X trigger=0x%08X frame=%llu",
+   real_pc, poke_halt_pc_local, (unsigned long long)frame_counter);
  else
   snprintf(msg, sizeof(msg), "done step pc=0x%08X frame=%llu",
    real_pc, (unsigned long long)frame_counter);
