@@ -20,6 +20,7 @@ import asyncio
 import subprocess
 import tempfile
 import struct
+import json
 
 from mcp.server.fastmcp import FastMCP
 
@@ -545,6 +546,138 @@ async def breakpoint_list() -> str:
         return "FAIL: No session"
     ack = await _send_and_wait("breakpoint_list", "breakpoints", timeout=5)
     return ack if ack else "FAIL: timed out"
+
+
+@mcp.tool()
+async def breakpoint_set_from_file(path: str,
+                                   result_path: str = "",
+                                   clear_existing: bool = False) -> str:
+    """Bulk-install PC breakpoints (log mode) from a text file.
+
+    File format: one hex address per line (optional 0x prefix). '#' starts a
+    comment (rest of line ignored). Blank lines skipped. Whitespace tolerant.
+    All addresses are installed with log-only semantics (no pause) — hits are
+    appended to breakpoint_hits.txt with full register + call-stack context.
+
+    clear_existing=True removes all prior breakpoints and truncates the hit log
+    before installing. Partial parse failures are non-fatal: valid addresses
+    still install and failing lines are listed in the result JSON.
+
+    Side effect: enabling log mode is a session-global flip. Any breakpoints
+    previously installed in pause mode (plain `breakpoint_set(..., log=False)`)
+    will stop pausing for the rest of the session — they become log-only too.
+
+    Returns a compact one-line status. Full per-failure detail is written to
+    result_path (defaults to <path>.result.json next to the input)."""
+    if not _alive():
+        return "FAIL: No session"
+    in_path = os.path.abspath(path)
+    if not os.path.exists(in_path):
+        return f"FAIL: input file not found: {in_path}"
+    out_path = os.path.abspath(result_path) if result_path else (in_path + ".result.json")
+    if os.path.normcase(in_path) == os.path.normcase(out_path):
+        return "FAIL: result_path must differ from input path (would overwrite input)"
+    out_dir = os.path.dirname(out_path) or "."
+    if not os.path.isdir(out_dir):
+        return f"FAIL: result_path directory does not exist: {out_dir}"
+
+    cmd = f"breakpoint_set_from_file {wsl_path(in_path)} {wsl_path(out_path)}"
+    if clear_existing:
+        cmd += " clear"
+    ack = await _send_and_wait(cmd,
+                               ["ok breakpoint_set_from_file",
+                                "error breakpoint_set_from_file",
+                                "error unknown command"],
+                               timeout=60)
+    if not ack:
+        return "FAIL: breakpoint_set_from_file timed out"
+    # Emulator only mutates its breakpoint set when the ack starts with "ok",
+    # so syncing _active_breakpoints on success alone keeps Python in lockstep.
+    if ack.startswith("ok breakpoint_set_from_file"):
+        if clear_existing:
+            _active_breakpoints.clear()
+        try:
+            with open(in_path, encoding="utf-8", errors="replace") as f:
+                for line in f:
+                    s = line.split("#", 1)[0].strip()
+                    if not s:
+                        continue
+                    if s.lower().startswith("0x"):
+                        s = s[2:]
+                    if s and all(c in "0123456789abcdefABCDEF" for c in s) and len(s) <= 8:
+                        _active_breakpoints.add(s.upper().zfill(8))
+        except OSError:
+            pass
+        if _active_breakpoints:
+            _break_sources.add("breakpoint")
+        return f"{ack} result_file={out_path}"
+    return ack
+
+
+@mcp.tool()
+async def breakpoint_hits_summary(result_path: str = "",
+                                  hits_path: str = "") -> str:
+    """Summarize a breakpoint_hits.txt log into a JSON file.
+
+    Scans for '--- break pc=... addr=... frame=... ---' markers and the 'regs'
+    line that follows each one. Produces per-address hit counts and the set of
+    unique caller PR values observed. Full summary is written to result_path
+    (defaults to <hits_path>.summary.json); returns a compact one-line status.
+
+    hits_path defaults to the IPC-dir breakpoint_hits.txt written by the
+    emulator's log-mode breakpoints.
+
+    broken_hits counts break markers that were not followed by a 'regs' line
+    before the next marker (truncated / interleaved log). Non-zero values
+    suggest the log was written while another session was appending."""
+    if not hits_path:
+        if not _ipc_dir:
+            return "FAIL: no session / no default hits path; pass hits_path"
+        hits_path = os.path.join(_ipc_dir, "breakpoint_hits.txt")
+    hits_path = os.path.abspath(hits_path)
+    if not os.path.exists(hits_path):
+        return f"FAIL: hits file not found: {hits_path}"
+    out_path = os.path.abspath(result_path) if result_path else (hits_path + ".summary.json")
+
+    by_address: dict[str, int] = {}
+    unique_prs: set[str] = set()
+    total_hits = 0
+    broken_hits = 0
+    break_re = re.compile(r"--- break pc=0x([0-9A-Fa-f]+) addr=0x([0-9A-Fa-f]+) frame=(\d+)")
+    pr_re = re.compile(r"\bPR=([0-9A-Fa-f]{8})")
+    expect_regs = False
+    with open(hits_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            m = break_re.match(line)
+            if m:
+                if expect_regs:
+                    broken_hits += 1  # previous marker had no regs line
+                addr = "0x" + m.group(2).upper().zfill(8)
+                by_address[addr] = by_address.get(addr, 0) + 1
+                total_hits += 1
+                expect_regs = True
+                continue
+            if expect_regs and line.startswith("regs"):
+                pm = pr_re.search(line)
+                if pm:
+                    unique_prs.add("0x" + pm.group(1).upper())
+                expect_regs = False
+    if expect_regs:
+        broken_hits += 1  # last marker in file had no regs line
+    sorted_by_addr = dict(sorted(by_address.items(), key=lambda kv: kv[1], reverse=True))
+    summary = {
+        "hits_file": hits_path,
+        "total_hits": total_hits,
+        "unique_addresses": len(by_address),
+        "broken_hits": broken_hits,
+        "unique_caller_PRs": sorted(unique_prs),
+        "by_address": sorted_by_addr,
+    }
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    return (f"ok breakpoint_hits_summary total_hits={total_hits} "
+            f"unique_addresses={len(by_address)} unique_prs={len(unique_prs)} "
+            f"broken_hits={broken_hits} result_file={out_path}")
 
 
 # ---------------------------------------------------------------------------

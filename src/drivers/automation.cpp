@@ -33,6 +33,11 @@
  *   breakpoint_remove <addr>   - Remove specific PC breakpoint
  *   breakpoint_clear           - Remove all breakpoints
  *   breakpoint_list            - List active breakpoints
+ *   breakpoint_set_from_file <input_path> <result_path> [clear]
+ *                              - Bulk-install PC breakpoints in log mode from a text file
+ *                                (one hex address per line, optional 0x prefix; '#' = comment).
+ *                                Writes per-line failure list + summary to <result_path> as JSON.
+ *                                "clear" token clears existing breakpoints + log before install.
  *   poke_breakpoint <trigger_pc> <n> <addr>:<val>:<width> ...
  *                              - On each hit at trigger_pc, write <n> pokes (atomic)
  *                                and continue without pausing. width is bits (8/16/32).
@@ -806,6 +811,133 @@ static void process_command(const std::string& line)
    ss << buf;
   }
   write_ack(ss.str());
+ }
+ else if (cmd == "breakpoint_set_from_file") {
+  // breakpoint_set_from_file <input_path> <result_path> [clear]
+  // Bulk installer for PC breakpoints in log mode (no pause). Input is a text file
+  // with one hex address per line (optional 0x prefix). '#' starts a comment,
+  // blank lines are ignored. Per-line parse failures are surfaced in the result
+  // JSON; install proceeds for all valid addresses.
+  //
+  // Side effect: flips breakpoint_log_mode globally. Any previously-installed
+  // pause-mode breakpoints become log-only for the rest of the session (matches
+  // singular `breakpoint <addr> log` semantics).
+  //
+  // Atomic ordering: parse input + write result file FIRST. Only mutate the
+  // live breakpoint set if the result file was successfully written — keeps
+  // Python-side bookkeeping in sync on I/O failures.
+  std::string input_path, result_path, clear_tok;
+  iss >> input_path >> result_path;
+  bool clear_existing = false;
+  if (iss >> clear_tok && clear_tok == "clear") clear_existing = true;
+
+  if (input_path.empty() || result_path.empty()) {
+   write_ack("error breakpoint_set_from_file: usage <input_path> <result_path> [clear]");
+  } else {
+   std::ifstream in(input_path.c_str());
+   if (!in.is_open()) {
+    write_ack("error breakpoint_set_from_file: cannot open input " + input_path);
+   } else {
+    // ---- Pass 1: parse input into temp structures (no state mutation yet) ----
+    int requested = 0;
+    std::vector<uint32_t> valid_addrs;
+    std::vector<std::pair<int, std::string>> failures;
+    std::string line;
+    int line_no = 0;
+    while (std::getline(in, line)) {
+     line_no++;
+     auto hash = line.find('#');
+     if (hash != std::string::npos) line.erase(hash);
+     auto b = line.find_first_not_of(" \t\r\n");
+     if (b == std::string::npos) continue;
+     auto e = line.find_last_not_of(" \t\r\n");
+     std::string tok = line.substr(b, e - b + 1);
+     if (tok.empty()) continue;
+
+     requested++;
+     std::string raw = tok;
+     if (tok.size() >= 2 && (tok.compare(0, 2, "0x") == 0 || tok.compare(0, 2, "0X") == 0))
+      tok.erase(0, 2);
+     if (tok.empty() || tok.size() > 8 ||
+         tok.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) {
+      failures.push_back({line_no, raw});
+      continue;
+     }
+     valid_addrs.push_back((uint32_t)strtoul(tok.c_str(), nullptr, 16));
+    }
+    in.close();
+
+    // Simulate the install so the result JSON reflects the final state.
+    std::unordered_set<uint32_t> sim;
+    if (!clear_existing) sim = breakpoints;
+    int installed = 0, duplicates = 0;
+    for (uint32_t a : valid_addrs) {
+     if (sim.insert(a).second) installed++;
+     else duplicates++;
+    }
+
+    // ---- Pass 2: write result JSON FIRST. Bail without mutating state on I/O fail. ----
+    FILE* out = fopen(result_path.c_str(), "w");
+    if (!out) {
+     write_ack("error breakpoint_set_from_file: cannot write result " + result_path);
+    } else {
+     fprintf(out, "{\n");
+     fprintf(out, "  \"requested\": %d,\n", requested);
+     fprintf(out, "  \"installed\": %d,\n", installed);
+     fprintf(out, "  \"duplicates\": %d,\n", duplicates);
+     fprintf(out, "  \"failed\": %zu,\n", failures.size());
+     fprintf(out, "  \"total_breakpoints\": %zu,\n", sim.size());
+     fprintf(out, "  \"cleared_before_install\": %s,\n", clear_existing ? "true" : "false");
+     fprintf(out, "  \"log_mode\": true,\n");
+     fputs("  \"failures\": [", out);
+     for (size_t i = 0; i < failures.size(); ++i) {
+      // JSON-escape per RFC 8259: \\, \", and control chars < 0x20 → \uXXXX.
+      // Pass higher bytes through as-is (valid UTF-8 remains valid UTF-8).
+      std::string esc;
+      for (unsigned char c : failures[i].second) {
+       if (c == '"') esc += "\\\"";
+       else if (c == '\\') esc += "\\\\";
+       else if (c < 0x20) {
+        char ubuf[8];
+        snprintf(ubuf, sizeof(ubuf), "\\u%04X", c);
+        esc += ubuf;
+       } else {
+        esc += (char)c;
+       }
+      }
+      fprintf(out, "%s\n    {\"line\": %d, \"raw\": \"%s\"}",
+              i ? "," : "", failures[i].first, esc.c_str());
+     }
+     fputs(failures.empty() ? "]\n" : "\n  ]\n", out);
+     fputs("}\n", out);
+     fclose(out);
+
+     // ---- Pass 3: mutate live state, now that persistence has succeeded. ----
+     if (clear_existing) {
+      breakpoints.clear();
+      if (bp_log) { fclose(bp_log); bp_log = nullptr; }
+     }
+     breakpoint_log_mode = true;
+     if (!bp_log) {
+      std::string hits_path = auto_base_dir + "/breakpoint_hits.txt";
+      bp_log = fopen(hits_path.c_str(), "w");
+      if (bp_log)
+       fprintf(bp_log, "# Breakpoint hit log (log mode)\n");
+     }
+     for (uint32_t a : valid_addrs) breakpoints.insert(a);
+     update_cpu_hook();
+
+     std::ostringstream ack;
+     ack << "ok breakpoint_set_from_file requested=" << requested
+         << " installed=" << installed
+         << " duplicates=" << duplicates
+         << " failed=" << failures.size()
+         << " total=" << breakpoints.size()
+         << " result=" << result_path;
+     write_ack(ack.str());
+    }
+   }
+  }
  }
  else if (cmd == "show_window") {
   Video_AutomationShowWindow();
