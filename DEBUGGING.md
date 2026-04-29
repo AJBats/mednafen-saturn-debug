@@ -146,11 +146,12 @@ VDP2 VRAM, VDP2 CRAM, SCSP sound RAM. Unmapped addresses return 0xFF.
 | Command | Description | Ack |
 |---------|-------------|-----|
 | `step [N]` | Execute N CPU instructions, then pause | `ok step N` then `done step pc=0xXXXXXXXX frame=N` |
-| `breakpoint <addr>` | Add PC breakpoint (hex, deduplicates) | `ok breakpoint 0xXXXXXXXX total=N` |
+| `breakpoint <addr> [log] [once]` | Add PC breakpoint (hex, deduplicates). `log` = log-only, `once` = log + auto-erase on first hit | `ok breakpoint 0xXXXXXXXX total=N [log] [once]` |
 | `breakpoint_remove <addr>` | Remove specific breakpoint | `ok breakpoint_remove 0xXXXXXXXX total=N` |
 | `breakpoint_clear` | Remove all breakpoints | `ok breakpoint_clear removed=N` |
-| `breakpoint_list` | List active breakpoints | `breakpoints count=N 0xAAAAAAAA 0xBBBBBBBB` |
-| `continue` | Resume until next breakpoint | `ok continue` then `break pc=0xXXXXXXXX ...` on hit |
+| `breakpoint_list` | List active breakpoints (oneshot entries marked `[once]`) | `breakpoints count=N 0xAAAAAAAA[once] 0xBBBBBBBB` |
+| `breakpoint_set_from_file <input> <result> [clear] [once]` | Bulk install from text file. `once` recommended for >1000 BP sweeps | `ok breakpoint_set_from_file requested=N installed=M ... [once]` |
+| `run` | Resume execution. With breakpoints/watchpoints/exception_break active, emits `break pc=0xXXXXXXXX addr=0xXXXXXXXX frame=N bp_total=M` on BP hit (`bp_total` is post-erase, so clients can detect oneshot drains). | `break pc=0xXXXXXXXX addr=0xXXXXXXXX frame=N bp_total=M` |
 | `dump_cycle` | Report current master cycle count | `ok dump_cycle value=N` |
 | `run_to_cycle N` | Run until master cycle reaches N | `ok run_to_cycle target=N` then `done run_to_cycle ...` on hit |
 | `deterministic` | Enable deterministic mode (fixed seed) | `ok deterministic` |
@@ -163,6 +164,13 @@ this pause because the action file is polled inside the spin-wait.
 **Performance**: The CPU hook is enabled/disabled dynamically. When no breakpoints, steps,
 or traces are active, overhead is zero. When active under software OpenGL (Mesa llvmpipe),
 expect ~100x slowdown - use `--sound 0` and hidden window.
+
+**Large breakpoint sets** (~thousands of entries) are dominated by per-instruction hashtable
+lookups, not by hit-side work. The lookups still run even after a BP has been logged. For
+coverage-style sweeps, install with `once` (or `oneshot=True` from the MCP) so each BP
+auto-erases on its first hit. Hot addresses fire immediately and drop out of the table; once
+the table empties, the CPU hook self-disables and the emulator returns to native speed.
+Without `once`, a 2000+ BP install can pin the emulator at ~1 FPS for the entire session.
 
 ### Debug: Tracing
 

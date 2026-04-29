@@ -28,16 +28,26 @@
  *   show_window                - Make the emulator window visible (for visual inspection)
  *   hide_window                - Hide the emulator window again
  *   step [N]                   - Step N CPU instructions then pause (default 1)
- *   breakpoint <addr> [log]    - Add PC breakpoint (hex address). "log" = log-only (no pause),
- *                                 writes full context (regs + call stack) to breakpoint_hits.txt
+ *   breakpoint <addr> [log] [once]
+ *                              - Add PC breakpoint (hex address). Tokens any order.
+ *                                "log"  = log-only (no pause), writes full context
+ *                                         (regs + call stack) to breakpoint_hits.txt.
+ *                                "once" = auto-erase this BP after its first hit; once
+ *                                         the BP table empties, the per-instruction
+ *                                         CPU hook self-disables (perf recovery for
+ *                                         large sweeps). Pairs naturally with "log".
  *   breakpoint_remove <addr>   - Remove specific PC breakpoint
  *   breakpoint_clear           - Remove all breakpoints
- *   breakpoint_list            - List active breakpoints
- *   breakpoint_set_from_file <input_path> <result_path> [clear]
+ *   breakpoint_list            - List active breakpoints (oneshot entries marked [once])
+ *   breakpoint_set_from_file <input_path> <result_path> [clear] [once]
  *                              - Bulk-install PC breakpoints in log mode from a text file
  *                                (one hex address per line, optional 0x prefix; '#' = comment).
  *                                Writes per-line failure list + summary to <result_path> as JSON.
- *                                "clear" token clears existing breakpoints + log before install.
+ *                                Optional tokens (any order):
+ *                                  "clear" = clear existing breakpoints + log first
+ *                                  "once"  = install entries as oneshot (log + erase on
+ *                                            first hit). Recommended for coverage sweeps
+ *                                            of 1000+ BPs to avoid the 1FPS death spiral.
  *   poke_breakpoint <trigger_pc> <n> <addr>:<val>:<width> ...
  *                              - On each hit at trigger_pc, write <n> pokes (atomic)
  *                                and continue without pausing. width is bits (8/16/32).
@@ -216,8 +226,17 @@ static bool pc_trace_frame_mode = false;
 static int64_t instructions_to_step = -1;  // -1=not stepping, 0=step done, >0=counting
 static bool instruction_paused = false;     // true when spin-waiting inside debug hook
 
-// Breakpoint set (O(1) lookup, deduplicates automatically)
-static std::unordered_set<uint32_t> breakpoints;
+// Per-breakpoint flag bits. Bitfield leaves room for future per-BP modes
+// (currently breakpoint_log_mode is still a session-global flip).
+static constexpr uint8_t BP_ONESHOT = 0x01;  // Auto-erase on first hit.
+
+// Breakpoint table. Map keyed by PC, value is a flag bitfield. Re-installing
+// the same address OR-merges flags. On a oneshot hit the entry is erased and
+// update_cpu_hook() is called — once the table empties, the per-instruction
+// debug hook self-disables, dropping back to native speed. This is what makes
+// large bulk installs (thousands of BPs) recover full performance after the
+// first sweep instead of paying O(set lookup) on every instruction forever.
+static std::unordered_map<uint32_t, uint8_t> breakpoints;
 
 // Track whether the CPU debug hook is currently enabled
 static bool cpu_hook_active = false;
@@ -760,11 +779,20 @@ static void process_command(const std::string& line)
   write_ack("ok step " + std::to_string(n));
  }
  else if (cmd == "breakpoint") {
+  // breakpoint <addr> [log] [once]   (tokens any order, both optional)
+  //   log  = enable session-global log-only mode (no pause)
+  //   once = auto-erase this BP after its first hit (recovers perf for
+  //          large coverage sweeps; pairs naturally with `log`)
   uint32_t addr = 0;
   iss >> std::hex >> addr;
-  // Check for "log" flag
+  uint8_t flags = 0;
+  bool log_flag = false;
   std::string token;
-  if (iss >> token && token == "log") {
+  while (iss >> token) {
+   if (token == "log") log_flag = true;
+   else if (token == "once" || token == "oneshot") flags |= BP_ONESHOT;
+  }
+  if (log_flag) {
    breakpoint_log_mode = true;
    if (!bp_log) {
     std::string path = auto_base_dir + "/breakpoint_hits.txt";
@@ -773,12 +801,17 @@ static void process_command(const std::string& line)
      fprintf(bp_log, "# Breakpoint hit log (log mode)\n");
    }
   }
-  breakpoints.insert(addr);
+  // OR-merge flags so re-installing the same address upgrades it (e.g. a
+  // plain `breakpoint X` followed by `breakpoint X once` becomes oneshot).
+  auto bp_it = breakpoints.find(addr);
+  if (bp_it != breakpoints.end()) bp_it->second |= flags;
+  else breakpoints.emplace(addr, flags);
   update_cpu_hook();
   char buf[64];
   snprintf(buf, sizeof(buf), "0x%08X", addr);
   std::string ack_msg = "ok breakpoint " + std::string(buf) + " total=" + std::to_string(breakpoints.size());
   if (breakpoint_log_mode) ack_msg += " log";
+  if (flags & BP_ONESHOT) ack_msg += " once";
   write_ack(ack_msg);
  }
  else if (cmd == "breakpoint_remove") {
@@ -805,19 +838,29 @@ static void process_command(const std::string& line)
  else if (cmd == "breakpoint_list") {
   std::ostringstream ss;
   ss << "breakpoints count=" << breakpoints.size();
-  for (auto addr : breakpoints) {
-   char buf[16];
-   snprintf(buf, sizeof(buf), " 0x%08X", addr);
+  for (auto& kv : breakpoints) {
+   char buf[24];
+   if (kv.second & BP_ONESHOT)
+    snprintf(buf, sizeof(buf), " 0x%08X[once]", kv.first);
+   else
+    snprintf(buf, sizeof(buf), " 0x%08X", kv.first);
    ss << buf;
   }
   write_ack(ss.str());
  }
  else if (cmd == "breakpoint_set_from_file") {
-  // breakpoint_set_from_file <input_path> <result_path> [clear]
+  // breakpoint_set_from_file <input_path> <result_path> [clear] [once]
   // Bulk installer for PC breakpoints in log mode (no pause). Input is a text file
   // with one hex address per line (optional 0x prefix). '#' starts a comment,
   // blank lines are ignored. Per-line parse failures are surfaced in the result
   // JSON; install proceeds for all valid addresses.
+  //
+  // Optional tokens (any order after result_path):
+  //   clear -- clear existing breakpoints + truncate hit log before install
+  //   once  -- install all entries with BP_ONESHOT: each fires log + erase on
+  //            its first hit. As entries drain, the per-instruction CPU hook
+  //            self-disables once the table empties (recovers full FPS for
+  //            large coverage sweeps).
   //
   // Side effect: flips breakpoint_log_mode globally. Any previously-installed
   // pause-mode breakpoints become log-only for the rest of the session (matches
@@ -826,13 +869,18 @@ static void process_command(const std::string& line)
   // Atomic ordering: parse input + write result file FIRST. Only mutate the
   // live breakpoint set if the result file was successfully written — keeps
   // Python-side bookkeeping in sync on I/O failures.
-  std::string input_path, result_path, clear_tok;
+  std::string input_path, result_path;
   iss >> input_path >> result_path;
   bool clear_existing = false;
-  if (iss >> clear_tok && clear_tok == "clear") clear_existing = true;
+  uint8_t default_flags = 0;
+  std::string opt_tok;
+  while (iss >> opt_tok) {
+   if (opt_tok == "clear") clear_existing = true;
+   else if (opt_tok == "once" || opt_tok == "oneshot") default_flags |= BP_ONESHOT;
+  }
 
   if (input_path.empty() || result_path.empty()) {
-   write_ack("error breakpoint_set_from_file: usage <input_path> <result_path> [clear]");
+   write_ack("error breakpoint_set_from_file: usage <input_path> <result_path> [clear] [once]");
   } else {
    std::ifstream in(input_path.c_str());
    if (!in.is_open()) {
@@ -868,12 +916,13 @@ static void process_command(const std::string& line)
     in.close();
 
     // Simulate the install so the result JSON reflects the final state.
-    std::unordered_set<uint32_t> sim;
+    std::unordered_map<uint32_t, uint8_t> sim;
     if (!clear_existing) sim = breakpoints;
     int installed = 0, duplicates = 0;
     for (uint32_t a : valid_addrs) {
-     if (sim.insert(a).second) installed++;
-     else duplicates++;
+     auto ins = sim.emplace(a, default_flags);
+     if (ins.second) installed++;
+     else { ins.first->second |= default_flags; duplicates++; }
     }
 
     // ---- Pass 2: write result JSON FIRST. Bail without mutating state on I/O fail. ----
@@ -889,6 +938,11 @@ static void process_command(const std::string& line)
      fprintf(out, "  \"total_breakpoints\": %zu,\n", sim.size());
      fprintf(out, "  \"cleared_before_install\": %s,\n", clear_existing ? "true" : "false");
      fprintf(out, "  \"log_mode\": true,\n");
+     // "oneshot" reflects the install command flag, not whether every entry
+     // in the resulting table has BP_ONESHOT set. If the caller didn't pass
+     // `once`, pre-existing oneshot entries (if any) keep their flag — but
+     // this field will still read false.
+     fprintf(out, "  \"oneshot\": %s,\n", (default_flags & BP_ONESHOT) ? "true" : "false");
      fputs("  \"failures\": [", out);
      for (size_t i = 0; i < failures.size(); ++i) {
       // JSON-escape per RFC 8259: \\, \", and control chars < 0x20 → \uXXXX.
@@ -924,7 +978,10 @@ static void process_command(const std::string& line)
       if (bp_log)
        fprintf(bp_log, "# Breakpoint hit log (log mode)\n");
      }
-     for (uint32_t a : valid_addrs) breakpoints.insert(a);
+     for (uint32_t a : valid_addrs) {
+      auto ins = breakpoints.emplace(a, default_flags);
+      if (!ins.second) ins.first->second |= default_flags;
+     }
      update_cpu_hook();
 
      std::ostringstream ack;
@@ -932,8 +989,9 @@ static void process_command(const std::string& line)
          << " installed=" << installed
          << " duplicates=" << duplicates
          << " failed=" << failures.size()
-         << " total=" << breakpoints.size()
-         << " result=" << result_path;
+         << " total=" << breakpoints.size();
+     if (default_flags & BP_ONESHOT) ack << " once";
+     ack << " result=" << result_path;
      write_ack(ack.str());
     }
    }
@@ -2374,17 +2432,30 @@ bool Automation_DebugHook(uint32_t pc)
    perform_pokes_from_trigger(it->second, poke_tpc);
  }
 
- // Check breakpoints (O(1) lookup via unordered_set)
+ // Check breakpoints (O(1) lookup via unordered_map)
  // Also check pc-2: after JSR/BSR/JMP/RTS, the SH-2 pipeline fetch stage
  // advances PC past the first instruction at the branch target.
  // UCDelayBranch does FetchIF_ForceIBufferFill() which sets PC = target+2.
  // So when this hook fires, PC is already target+2 and a breakpoint set at
  // the exact branch target ('target') would miss without this fallback.
- bool bp_hit = breakpoints.count(pc) > 0;
+ bool bp_hit = false;
  uint32_t bp_addr = pc;
- if (!bp_hit && breakpoints.count(pc - 2) > 0) {
+ auto bp_it = breakpoints.find(pc);
+ if (bp_it == breakpoints.end()) {
+  bp_it = breakpoints.find(pc - 2);
+  if (bp_it != breakpoints.end()) {
+   bp_hit = true;
+   bp_addr = pc - 2;
+  }
+ } else {
   bp_hit = true;
-  bp_addr = pc - 2;
+ }
+ if (bp_hit && (bp_it->second & BP_ONESHOT)) {
+  // Erase before any further processing — this lets the table shrink as
+  // coverage saturates, eventually emptying it and self-disabling the
+  // per-instruction hook for full FPS recovery on large sweeps.
+  breakpoints.erase(bp_it);
+  update_cpu_hook();
  }
 
  // Check cycle target
@@ -2441,8 +2512,10 @@ bool Automation_DebugHook(uint32_t pc)
 
  char msg[256];
  if (bp_hit)
-  snprintf(msg, sizeof(msg), "break pc=0x%08X addr=0x%08X frame=%llu",
-   pc, bp_addr, (unsigned long long)frame_counter);
+  // bp_total reports the post-erase BP table size — lets clients reconcile
+  // their breakable-instrument bookkeeping when oneshot BPs self-erase.
+  snprintf(msg, sizeof(msg), "break pc=0x%08X addr=0x%08X frame=%llu bp_total=%zu",
+   pc, bp_addr, (unsigned long long)frame_counter, breakpoints.size());
  else if (cycle_hit)
   snprintf(msg, sizeof(msg), "done run_to_cycle pc=0x%08X frame=%llu",
    real_pc, (unsigned long long)frame_counter);

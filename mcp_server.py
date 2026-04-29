@@ -60,10 +60,31 @@ _home_dir = None
 # Cheat-engine memory snapshots (name -> bytes)
 _memory_snapshots = {}
 
-# Track whether any break-producing instruments are active, so run_free
-# can auto-detect whether to wait for a break event.
+# Track which instrument categories can produce a pause event, so run_free
+# auto-detects whether to wait. Logged-only instruments (watchpoint log,
+# breakpoint log, exception_break log, breakpoint_set_from_file) never appear
+# here — they don't produce pause events, so run_free shouldn't block on them.
 _break_sources = set()  # e.g. {"breakpoint", "watchpoint", "read_watchpoint", "exception"}
-_active_breakpoints = set()  # Individual breakpoint addresses (hex strings)
+
+# Count of breakable (pause-mode) PC breakpoints currently installed. Used only
+# to know when to drop "breakpoint" from _break_sources. Reconciled from the
+# bp_total= field in `break` acks (covers oneshot self-erase + bulk clears).
+_breakable_bp_count = 0
+
+
+def _reconcile_break_ack(ack):
+    """If the ack reports a post-erase BP total, sync our breakable count.
+    Pause-mode oneshot BPs disappear in C++ on hit — without this, the
+    Python tag would persist and run_free would block on phantom events."""
+    if not ack:
+        return
+    m = re.search(r"\bbp_total=(\d+)", ack)
+    if not m:
+        return
+    global _breakable_bp_count
+    _breakable_bp_count = int(m.group(1))
+    if _breakable_bp_count == 0:
+        _break_sources.discard("breakpoint")
 
 
 def _send(cmd):
@@ -144,8 +165,9 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
         except subprocess.TimeoutExpired:
             _proc.kill()
 
+    global _breakable_bp_count
     _break_sources.clear()
-    _active_breakpoints.clear()
+    _breakable_bp_count = 0
     cue = cue_path or _default_cue or ""
     if not cue:
         return "FAIL: No disc image. Pass cue_path or use --cue."
@@ -241,6 +263,7 @@ async def frame_advance(count: int = 1) -> str:
     ack = await _send_and_wait(f"frame_advance {count}",
                                ["done frame_advance", "hit watchpoint", "hit read_watchpoint", "break pc=", "hit exception"],
                                timeout=180)
+    _reconcile_break_ack(ack)
     if ack:
         if "hit watchpoint" in ack or "hit read_watchpoint" in ack:
             return ack
@@ -287,7 +310,7 @@ async def screenshot(output_path: str = "", scale: int = 3) -> str:
 @mcp.tool()
 async def quit_emulator() -> str:
     """Shutdown Mednafen."""
-    global _proc
+    global _proc, _breakable_bp_count
     if _alive():
         _send("quit")
         try:
@@ -296,7 +319,7 @@ async def quit_emulator() -> str:
             _proc.kill()
     _proc = None
     _break_sources.clear()
-    _active_breakpoints.clear()
+    _breakable_bp_count = 0
     return "OK"
 
 
@@ -496,19 +519,28 @@ async def call_stack(scan_size: int = 1024) -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def breakpoint_set(address: str, log: bool = False) -> str:
+async def breakpoint_set(address: str, log: bool = False, oneshot: bool = False) -> str:
     """Set a PC breakpoint. Address in hex (e.g. '0x0600C5D6').
     If log=True, logs full context (registers + call stack) to
-    breakpoint_hits.txt without pausing. Use for surveying all callers."""
+    breakpoint_hits.txt without pausing. Use for surveying all callers.
+    If oneshot=True, the BP auto-erases after its first hit. Once the BP
+    table empties, the per-instruction CPU hook self-disables — use this
+    for large coverage sweeps to avoid the 1FPS death spiral."""
     if not _alive():
         return "FAIL: No session"
     addr = _strip_hex(address)
     cmd = f"breakpoint {addr}"
     if log:
         cmd += " log"
+    if oneshot:
+        cmd += " once"
     ack = await _send_and_wait(cmd, "ok breakpoint", timeout=5)
+    # Track only breakable (non-log) BPs. Log-mode BPs never produce a pause
+    # event, so they don't gate run_free. Pause+oneshot is breakable for one
+    # hit — run_free reconciles via bp_total= in the break ack.
     if ack and not log:
-        _active_breakpoints.add(addr)
+        global _breakable_bp_count
+        _breakable_bp_count += 1
         _break_sources.add("breakpoint")
     return ack if ack else "FAIL: timed out"
 
@@ -520,10 +552,11 @@ async def breakpoint_remove(address: str) -> str:
         return "FAIL: No session"
     addr = _strip_hex(address)
     ack = await _send_and_wait(f"breakpoint_remove {addr}", "breakpoint_remove", timeout=5)
-    if ack:
-        _active_breakpoints.discard(addr)
-        if not _active_breakpoints:
-            _break_sources.discard("breakpoint")
+    # Don't touch _breakable_bp_count here — we don't know whether the removed
+    # entry was pause-mode or log-mode, so any decrement risks under/over-count
+    # in mixed-mode setups. Reconciliation happens authoritatively via
+    # bp_total= in the next break ack. Worst case: run_free waits one beat
+    # too long. That's better than skipping a wait we should have done.
     return ack if ack else "FAIL: timed out"
 
 
@@ -534,7 +567,8 @@ async def breakpoint_clear() -> str:
         return "FAIL: No session"
     ack = await _send_and_wait("breakpoint_clear", "breakpoint_clear", timeout=5)
     if ack:
-        _active_breakpoints.clear()
+        global _breakable_bp_count
+        _breakable_bp_count = 0
         _break_sources.discard("breakpoint")
     return ack if ack else "FAIL: timed out"
 
@@ -551,7 +585,8 @@ async def breakpoint_list() -> str:
 @mcp.tool()
 async def breakpoint_set_from_file(path: str,
                                    result_path: str = "",
-                                   clear_existing: bool = False) -> str:
+                                   clear_existing: bool = False,
+                                   oneshot: bool = False) -> str:
     """Bulk-install PC breakpoints (log mode) from a text file.
 
     File format: one hex address per line (optional 0x prefix). '#' starts a
@@ -562,6 +597,12 @@ async def breakpoint_set_from_file(path: str,
     clear_existing=True removes all prior breakpoints and truncates the hit log
     before installing. Partial parse failures are non-fatal: valid addresses
     still install and failing lines are listed in the result JSON.
+
+    oneshot=True installs each entry to log on first hit and then auto-erase.
+    As entries drain, the per-instruction CPU debug hook self-disables once
+    the table empties, restoring full FPS. Strongly recommended for coverage
+    sweeps of 1000+ BPs — without it, the per-instruction lookup overhead can
+    push the emulator down to ~1 FPS for the entire session.
 
     Side effect: enabling log mode is a session-global flip. Any breakpoints
     previously installed in pause mode (plain `breakpoint_set(..., log=False)`)
@@ -584,6 +625,8 @@ async def breakpoint_set_from_file(path: str,
     cmd = f"breakpoint_set_from_file {wsl_path(in_path)} {wsl_path(out_path)}"
     if clear_existing:
         cmd += " clear"
+    if oneshot:
+        cmd += " once"
     ack = await _send_and_wait(cmd,
                                ["ok breakpoint_set_from_file",
                                 "error breakpoint_set_from_file",
@@ -591,25 +634,15 @@ async def breakpoint_set_from_file(path: str,
                                timeout=60)
     if not ack:
         return "FAIL: breakpoint_set_from_file timed out"
-    # Emulator only mutates its breakpoint set when the ack starts with "ok",
-    # so syncing _active_breakpoints on success alone keeps Python in lockstep.
+    # Bulk install is always log-mode (no pause). It also flips the C++
+    # breakpoint_log_mode global, so any previously-installed pause-mode BPs
+    # become log-only too. Either way, after this command the breakable
+    # population is zero — drop the tag so run_free doesn't wait for events
+    # that will never come.
     if ack.startswith("ok breakpoint_set_from_file"):
-        if clear_existing:
-            _active_breakpoints.clear()
-        try:
-            with open(in_path, encoding="utf-8", errors="replace") as f:
-                for line in f:
-                    s = line.split("#", 1)[0].strip()
-                    if not s:
-                        continue
-                    if s.lower().startswith("0x"):
-                        s = s[2:]
-                    if s and all(c in "0123456789abcdefABCDEF" for c in s) and len(s) <= 8:
-                        _active_breakpoints.add(s.upper().zfill(8))
-        except OSError:
-            pass
-        if _active_breakpoints:
-            _break_sources.add("breakpoint")
+        global _breakable_bp_count
+        _breakable_bp_count = 0
+        _break_sources.discard("breakpoint")
         return f"{ack} result_file={out_path}"
     return ack
 
@@ -863,9 +896,12 @@ async def step(count: int = 1) -> str:
     """Execute N CPU instructions (step into). Default 1."""
     if not _alive():
         return "FAIL: No session"
+    # Also accept "break " — a step that crosses a pause-mode breakpoint
+    # reports as a break event, not "done step".
     ack = await _send_and_wait(f"step {count}",
-                               ["done step", "hit watchpoint", "hit read_watchpoint", "hit exception"],
+                               ["done step", "break ", "hit watchpoint", "hit read_watchpoint", "hit exception"],
                                timeout=30)
+    _reconcile_break_ack(ack)
     if ack and "hit exception" in ack:
         return f"EXCEPTION: {ack}"
     return ack if ack else "FAIL: step timed out"
@@ -1457,11 +1493,13 @@ async def run_to_frame(frame: int) -> str:
     global _frame
     if not _alive():
         return "FAIL: No session"
+    # Include "break pc=" so a pause-mode BP firing en route doesn't deadlock
+    # us waiting for "done run_to_frame" that will never arrive.
     ack = await _send_and_wait(f"run_to_frame {frame}",
-                               ["done run_to_frame", "hit watchpoint", "hit read_watchpoint", "hit exception"],
+                               ["done run_to_frame", "hit watchpoint", "hit read_watchpoint", "break pc=", "hit exception"],
                                timeout=300)
+    _reconcile_break_ack(ack)
     if ack:
-        import re
         m = re.search(r"frame=(\d+)", ack)
         if m:
             _frame = int(m.group(1))
@@ -1469,6 +1507,8 @@ async def run_to_frame(frame: int) -> str:
             return f"STOPPED at frame {_frame} by watchpoint (target was {frame}):\n{ack}"
         if "STOPPED_BY_EXCEPTION" in ack or "hit exception" in ack:
             return f"EXCEPTION at frame {_frame} (target was {frame}):\n{ack}"
+        if "break pc=" in ack:
+            return f"STOPPED at frame {_frame} by breakpoint (target was {frame}):\n{ack}"
         _frame = frame
         return f"OK: At frame {frame}"
     return "FAIL: run_to_frame timed out"
@@ -1487,6 +1527,7 @@ async def run_free(wait_for_break: bool | None = None, timeout: int = 300) -> st
     if not should_wait:
         return "ok run"
     ack = await _wait_ack(["break ", "hit watchpoint", "hit read_watchpoint", "hit exception", "done poke_playback"], timeout=timeout)
+    _reconcile_break_ack(ack)
     if ack and "hit exception" in ack:
         return f"EXCEPTION: {ack}"
     return ack if ack else f"TIMEOUT: no break event within {timeout}s"
