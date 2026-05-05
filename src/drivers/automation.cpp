@@ -90,6 +90,19 @@
  *                                 Also logs all hits to read_watchpoint_hits.txt.
  *                                 Optional: "log" = log-only (no pause), writes full context to log file.
  *   read_watchpoint_clear      - Remove read watchpoint and resume if paused
+ *   read_watchpoint_set_from_file <input_path> <result_path> [clear] [once]
+ *                              - Bulk-install byte-resolution read-watchpoints (log mode, no pause).
+ *                                Bitmap storage (4 × 128KB, fixed) — scales to every byte in WRAM
+ *                                with constant-time inline checks. Mirrors collapse: 0x06036CF8 /
+ *                                0x07036CF8 / 0x26036CF8 share one bit. Out-of-region addresses
+ *                                (anything outside LWR 0x00200000-0x003FFFFF or HWR 0x06000000-
+ *                                0x07FFFFFF) are skipped and counted in the result JSON.
+ *                                Hit log read_watchpoint_bulk_hits.txt, one line per hit:
+ *                                  pc=<load_pc> addr=<canonical_byte> val=<4byte_window> width=<bytes> frame=<N>
+ *                                Tokens: "clear" wipes existing bulk bitmaps + log first;
+ *                                        "once" sets per-byte oneshot — each hit clears its bit.
+ *                                Independent of singleton read_watchpoint; both can run concurrently.
+ *   read_watchpoint_bulk_clear - Remove all bulk read-watchpoints + close their log file.
  *   exception_break <mode>    - Control SH-2 exception reporting (enable=pause, log=log-only, disable=off)
  *                               Catches: address errors, illegal instructions, slot illegal, NMI.
  *                               Reports type, PC, SR, VBR, handler address + full register dump + call stack.
@@ -260,6 +273,68 @@ static bool read_watchpoint_paused = false;
 static bool read_watchpoint_log_mode = false; // true = log-only (no pause)
 static FILE* rwp_log = nullptr;
 
+// Bulk read-watchpoints — bitmap storage. Two 1-bit-per-byte bitmaps per
+// 1MB region (LWR and HWR), one for "watched" and one for "oneshot". Total
+// fixed cost: 4 × 128KB = 512KB regardless of how many WPs are installed.
+// Hot-path lookup is a single bit test (~1ns); scales to 8M WPs (every byte)
+// with no perf change. Hashtable storage was ruled out at the 85K scale: at
+// ~3M memory reads/sec the per-read map lookup pinned emulation to 1FPS,
+// the same cliff oneshot escapes for breakpoints — but read-WP drain is much
+// slower because the dependency-mapping use case is *finding bytes that
+// aren't read*, so most entries never fire.
+//
+// HWR mirrors collapse: 0x06036CF8, 0x07036CF8, 0x26036CF8 all share one
+// bit. Same for LWR mirrors at 0x002xxxxx / 0x003xxxxx. Canonical form is
+// (region_base | offset), emitted in the hit log so consumers always see
+// the canonical address regardless of which mirror the access went through.
+//
+// Per-region gates (in ss.cpp) flip false when that region's count drops to
+// zero, so when only LWR is loaded the HWR read path doesn't pay any cost
+// and vice versa.
+static constexpr uint32_t RWP_REGION_SIZE = 0x100000;        // 1MB per region
+static constexpr uint32_t RWP_REGION_MASK = 0x000FFFFF;      // offset within
+static constexpr uint32_t RWP_BITMAP_BYTES = RWP_REGION_SIZE / 8;  // 128KB
+static constexpr uint32_t RWP_LWR_BASE = 0x00200000;
+static constexpr uint32_t RWP_HWR_BASE = 0x06000000;
+
+static uint8_t rwp_lwr_watched[RWP_BITMAP_BYTES];
+static uint8_t rwp_lwr_oneshot[RWP_BITMAP_BYTES];
+static uint8_t rwp_hwr_watched[RWP_BITMAP_BYTES];
+static uint8_t rwp_hwr_oneshot[RWP_BITMAP_BYTES];
+static size_t rwp_lwr_count = 0;
+static size_t rwp_hwr_count = 0;
+static FILE* rwp_bulk_log = nullptr;
+
+static inline bool rwp_bit_test(const uint8_t* bm, uint32_t off) {
+ return (bm[off >> 3] >> (off & 7)) & 1;
+}
+static inline void rwp_bit_set(uint8_t* bm, uint32_t off) {
+ bm[off >> 3] |= (uint8_t)(1u << (off & 7));
+}
+static inline void rwp_bit_clear(uint8_t* bm, uint32_t off) {
+ bm[off >> 3] &= (uint8_t)~(1u << (off & 7));
+}
+
+// Classify a user-supplied address into (region, offset). Returns false for
+// addresses outside LWR/HWR — same scope as the singleton read_watchpoint.
+// Cache-region bits (0x20000000, 0x40000000, etc.) are stripped first.
+enum RwpRegion { RWP_REGION_NONE = 0, RWP_REGION_LWR = 1, RWP_REGION_HWR = 2 };
+static bool rwp_classify(uint32_t addr, RwpRegion* region_out, uint32_t* offset_out)
+{
+ uint32_t masked = addr & 0x0FFFFFFF;
+ if (masked >= 0x00200000 && masked <= 0x003FFFFF) {
+  *region_out = RWP_REGION_LWR;
+  *offset_out = masked & RWP_REGION_MASK;
+  return true;
+ }
+ if (masked >= 0x06000000 && masked <= 0x07FFFFFF) {
+  *region_out = RWP_REGION_HWR;
+  *offset_out = masked & RWP_REGION_MASK;
+  return true;
+ }
+ return false;
+}
+
 // Exception break state
 // "enable" = pause on exception (like breakpoints)
 // "log"    = log to file without pausing
@@ -383,6 +458,16 @@ static void update_cpu_hook(void)
   MDFN_IEN_SS::Automation_DisableCPUHook();
   cpu_hook_active = false;
  }
+}
+
+// Sync ss.cpp's per-region inline gates to current bitmap counts. Each region
+// has its own gate so a sweep loaded only into HWR doesn't pay any cost on
+// LWR reads, and vice versa. When a region's count drops to zero (oneshot
+// drain), its gate flips false and the inline check short-circuits.
+static void update_rwp_bulk_active(void)
+{
+ MDFN_IEN_SS::Automation_SetReadWatchpointBulkActive(rwp_lwr_count > 0,
+                                                     rwp_hwr_count > 0);
 }
 
 static int parse_button(const char* name)
@@ -1248,6 +1333,200 @@ static void process_command(const std::string& line)
   MDFN_IEN_SS::Automation_ClearReadWatchpoint();
   write_ack("ok read_watchpoint_clear");
  }
+ else if (cmd == "read_watchpoint_set_from_file") {
+  // read_watchpoint_set_from_file <input_path> <result_path> [clear] [once]
+  // Bulk installer for byte-resolution read-watchpoints in log mode (no pause).
+  // Mirrors breakpoint_set_from_file: input is a text file with one hex
+  // address per line (optional 0x prefix); '#' comments and blank lines OK.
+  // Per-line failures land in the result JSON, valid addrs install regardless.
+  //
+  // Optional tokens (any order after result_path):
+  //   clear -- clear existing bulk read-WPs + truncate hit log before install
+  //   once  -- install with oneshot: each byte logs on first hit then auto-
+  //            clears. Used to drain the watched set as coverage saturates;
+  //            for "find bytes that are never read" sweeps it doesn't help
+  //            much (target bytes never fire) but for confirmation sweeps it
+  //            does. Bitmap storage means scale is no longer the gate — the
+  //            inline check is constant-time regardless of count.
+  //
+  // Storage: 4 × 128KB bitmaps (LWR + HWR × watched + oneshot). Mirrors
+  // collapse: 0x06036CF8 / 0x07036CF8 / 0x26036CF8 share one bit. Addresses
+  // outside LWR (0x00200000-0x003FFFFF) and HWR (0x06000000-0x07FFFFFF) are
+  // counted as out_of_range and skipped. Hit log emits canonical addresses
+  // (region_base | offset) regardless of which mirror the access used.
+  //
+  // Each hit logs ONE LINE to read_watchpoint_bulk_hits.txt:
+  //   pc=<load_pc> addr=<canonical_byte> val=<4byte_window> width=<bytes> frame=<N>
+  // The pc= field is the load instruction's PC. val= is the 4-byte aligned
+  // window value (not the byte read — for narrow accesses, decode the load
+  // instruction at pc to recover width and exact byte). Use
+  // read_watchpoint_hits_summary to aggregate by (addr, pc) pairs.
+  //
+  // Note: this is independent of the singleton read_watchpoint command. The
+  // two can coexist; both fire on overlapping reads.
+  std::string input_path, result_path;
+  iss >> input_path >> result_path;
+  bool clear_existing = false;
+  bool oneshot_flag = false;
+  std::string opt_tok;
+  while (iss >> opt_tok) {
+   if (opt_tok == "clear") clear_existing = true;
+   else if (opt_tok == "once" || opt_tok == "oneshot") oneshot_flag = true;
+  }
+
+  if (input_path.empty() || result_path.empty()) {
+   write_ack("error read_watchpoint_set_from_file: usage <input_path> <result_path> [clear] [once]");
+  } else {
+   std::ifstream in(input_path.c_str());
+   if (!in.is_open()) {
+    write_ack("error read_watchpoint_set_from_file: cannot open input " + input_path);
+   } else {
+    // ---- Pass 1: parse input into temp structures (no state mutation yet) ----
+    int requested = 0;
+    std::vector<uint32_t> valid_addrs;
+    std::vector<std::pair<int, std::string>> failures;
+    std::string line;
+    int line_no = 0;
+    while (std::getline(in, line)) {
+     line_no++;
+     auto hash = line.find('#');
+     if (hash != std::string::npos) line.erase(hash);
+     auto b = line.find_first_not_of(" \t\r\n");
+     if (b == std::string::npos) continue;
+     auto e = line.find_last_not_of(" \t\r\n");
+     std::string tok = line.substr(b, e - b + 1);
+     if (tok.empty()) continue;
+
+     requested++;
+     std::string raw = tok;
+     if (tok.size() >= 2 && (tok.compare(0, 2, "0x") == 0 || tok.compare(0, 2, "0X") == 0))
+      tok.erase(0, 2);
+     if (tok.empty() || tok.size() > 8 ||
+         tok.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) {
+      failures.push_back({line_no, raw});
+      continue;
+     }
+     valid_addrs.push_back((uint32_t)strtoul(tok.c_str(), nullptr, 16));
+    }
+    in.close();
+
+    // ---- Pass 1.5: classify + simulate against bitmaps ----
+    // Track within-batch dedup with an unordered_set keyed by (region, offset)
+    // so the same address appearing twice in the input counts as duplicate
+    // even if the live bitmap currently has it unset.
+    int installed = 0, duplicates = 0, out_of_range = 0;
+    std::unordered_set<uint64_t> seen_in_batch;
+    for (uint32_t a : valid_addrs) {
+     RwpRegion region;
+     uint32_t offset;
+     if (!rwp_classify(a, &region, &offset)) {
+      out_of_range++;
+      continue;
+     }
+     uint64_t key = ((uint64_t)region << 32) | offset;
+     const uint8_t* bm = (region == RWP_REGION_LWR) ? rwp_lwr_watched : rwp_hwr_watched;
+     bool already_set = !clear_existing && rwp_bit_test(bm, offset);
+     bool batch_dup = !seen_in_batch.insert(key).second;
+     if (already_set || batch_dup) duplicates++;
+     else installed++;
+    }
+    size_t simulated_total =
+     (clear_existing ? 0 : (rwp_lwr_count + rwp_hwr_count)) + installed;
+
+    // ---- Pass 2: write result JSON FIRST. Bail without mutating state on I/O fail. ----
+    FILE* out = fopen(result_path.c_str(), "w");
+    if (!out) {
+     write_ack("error read_watchpoint_set_from_file: cannot write result " + result_path);
+    } else {
+     fprintf(out, "{\n");
+     fprintf(out, "  \"requested\": %d,\n", requested);
+     fprintf(out, "  \"installed\": %d,\n", installed);
+     fprintf(out, "  \"duplicates\": %d,\n", duplicates);
+     fprintf(out, "  \"out_of_range\": %d,\n", out_of_range);
+     fprintf(out, "  \"failed\": %zu,\n", failures.size());
+     fprintf(out, "  \"total_read_watchpoints\": %zu,\n", simulated_total);
+     fprintf(out, "  \"cleared_before_install\": %s,\n", clear_existing ? "true" : "false");
+     fprintf(out, "  \"log_mode\": true,\n");
+     fprintf(out, "  \"oneshot\": %s,\n", oneshot_flag ? "true" : "false");
+     fputs("  \"failures\": [", out);
+     for (size_t i = 0; i < failures.size(); ++i) {
+      // Same JSON escape policy as breakpoint_set_from_file.
+      std::string esc;
+      for (unsigned char c : failures[i].second) {
+       if (c == '"') esc += "\\\"";
+       else if (c == '\\') esc += "\\\\";
+       else if (c < 0x20) {
+        char ubuf[8];
+        snprintf(ubuf, sizeof(ubuf), "\\u%04X", c);
+        esc += ubuf;
+       } else {
+        esc += (char)c;
+       }
+      }
+      fprintf(out, "%s\n    {\"line\": %d, \"raw\": \"%s\"}",
+              i ? "," : "", failures[i].first, esc.c_str());
+     }
+     fputs(failures.empty() ? "]\n" : "\n  ]\n", out);
+     fputs("}\n", out);
+     fclose(out);
+
+     // ---- Pass 3: mutate live bitmaps, now that persistence has succeeded. ----
+     if (clear_existing) {
+      memset(rwp_lwr_watched, 0, sizeof(rwp_lwr_watched));
+      memset(rwp_lwr_oneshot, 0, sizeof(rwp_lwr_oneshot));
+      memset(rwp_hwr_watched, 0, sizeof(rwp_hwr_watched));
+      memset(rwp_hwr_oneshot, 0, sizeof(rwp_hwr_oneshot));
+      rwp_lwr_count = 0;
+      rwp_hwr_count = 0;
+      if (rwp_bulk_log) { fclose(rwp_bulk_log); rwp_bulk_log = nullptr; }
+     }
+     if (!rwp_bulk_log) {
+      std::string hits_path = auto_base_dir + "/read_watchpoint_bulk_hits.txt";
+      rwp_bulk_log = fopen(hits_path.c_str(), "w");
+      if (rwp_bulk_log)
+       fprintf(rwp_bulk_log, "# Bulk read-watchpoint hit log (one line per hit)\n");
+     }
+     for (uint32_t a : valid_addrs) {
+      RwpRegion region;
+      uint32_t offset;
+      if (!rwp_classify(a, &region, &offset)) continue;
+      uint8_t* watched = (region == RWP_REGION_LWR) ? rwp_lwr_watched : rwp_hwr_watched;
+      uint8_t* oneshot_bm = (region == RWP_REGION_LWR) ? rwp_lwr_oneshot : rwp_hwr_oneshot;
+      if (!rwp_bit_test(watched, offset)) {
+       rwp_bit_set(watched, offset);
+       if (region == RWP_REGION_LWR) rwp_lwr_count++; else rwp_hwr_count++;
+      }
+      // OR-merge: re-installing with `once` upgrades; without `once` preserves.
+      if (oneshot_flag) rwp_bit_set(oneshot_bm, offset);
+     }
+     update_rwp_bulk_active();
+
+     std::ostringstream ack;
+     ack << "ok read_watchpoint_set_from_file requested=" << requested
+         << " installed=" << installed
+         << " duplicates=" << duplicates
+         << " out_of_range=" << out_of_range
+         << " failed=" << failures.size()
+         << " total=" << (rwp_lwr_count + rwp_hwr_count);
+     if (oneshot_flag) ack << " once";
+     ack << " result=" << result_path;
+     write_ack(ack.str());
+    }
+   }
+  }
+ }
+ else if (cmd == "read_watchpoint_bulk_clear") {
+  size_t count = rwp_lwr_count + rwp_hwr_count;
+  memset(rwp_lwr_watched, 0, sizeof(rwp_lwr_watched));
+  memset(rwp_lwr_oneshot, 0, sizeof(rwp_lwr_oneshot));
+  memset(rwp_hwr_watched, 0, sizeof(rwp_hwr_watched));
+  memset(rwp_hwr_oneshot, 0, sizeof(rwp_hwr_oneshot));
+  rwp_lwr_count = 0;
+  rwp_hwr_count = 0;
+  if (rwp_bulk_log) { fclose(rwp_bulk_log); rwp_bulk_log = nullptr; }
+  update_rwp_bulk_active();
+  write_ack("ok read_watchpoint_bulk_clear removed=" + std::to_string(count));
+ }
  else if (cmd == "deterministic") {
   MDFN_IEN_SS::Automation_SetDeterministic();
   write_ack("ok deterministic");
@@ -2037,6 +2316,16 @@ void Automation_Kill(void)
  // still need flushing and closing.
  close_wp_log();
  if (rwp_log) { fclose(rwp_log); rwp_log = nullptr; }
+ if (rwp_bulk_log) { fclose(rwp_bulk_log); rwp_bulk_log = nullptr; }
+ // Wipe bulk read-WP bitmaps so a re-init starts clean. Cheap (4 × 128KB
+ // memset) and matches the lifecycle expected by the per-region gates.
+ memset(rwp_lwr_watched, 0, sizeof(rwp_lwr_watched));
+ memset(rwp_lwr_oneshot, 0, sizeof(rwp_lwr_oneshot));
+ memset(rwp_hwr_watched, 0, sizeof(rwp_hwr_watched));
+ memset(rwp_hwr_oneshot, 0, sizeof(rwp_hwr_oneshot));
+ rwp_lwr_count = 0;
+ rwp_hwr_count = 0;
+ update_rwp_bulk_active();
  if (bp_log) { fclose(bp_log); bp_log = nullptr; }
  if (exc_log) { fclose(exc_log); exc_log = nullptr; }
  poke_triggers.clear();
@@ -2269,6 +2558,67 @@ void Automation_ReadWatchpointHit(uint32_t pc, uint32_t addr, uint32_t val, uint
   check_action_file();
   check_exit_requested();
  }
+}
+
+// Called from ss.cpp's inline LWR/HWR read paths when the per-region gate
+// is true. Iterates the access window [base_addr, base_addr + width), tests
+// each byte against the region's watched bitmap (~1ns per bit), and on hit
+// writes ONE line to the bulk log:
+//   pc=<load_pc> addr=<canonical_byte> val=<4byte_window> width=<bytes> frame=<N>
+// Oneshot bytes clear themselves; when a region's count drops to zero its
+// inline gate flips false and that region's hot path stops calling here.
+//
+// One static helper for both regions, parameterized on the region tag so the
+// region-specific bitmaps and counter are selected once per call. The ss.cpp
+// gate already filters out the wrong-region case; this function trusts the
+// caller's region tag.
+static void rwp_bulk_check_impl(RwpRegion region, uint32_t pc, uint32_t base_addr,
+                                uint32_t val, uint32_t width)
+{
+ uint8_t* watched = (region == RWP_REGION_LWR) ? rwp_lwr_watched : rwp_hwr_watched;
+ uint8_t* oneshot = (region == RWP_REGION_LWR) ? rwp_lwr_oneshot : rwp_hwr_oneshot;
+ size_t* count = (region == RWP_REGION_LWR) ? &rwp_lwr_count : &rwp_hwr_count;
+ uint32_t region_base = (region == RWP_REGION_LWR) ? RWP_LWR_BASE : RWP_HWR_BASE;
+ uint32_t base_offset = base_addr & RWP_REGION_MASK;
+
+ bool any_cleared = false;
+ for (uint32_t i = 0; i < width; ++i) {
+  uint32_t off = (base_offset + i) & RWP_REGION_MASK;
+  if (!rwp_bit_test(watched, off)) continue;
+
+  uint32_t canonical = region_base | off;
+  if (rwp_bulk_log) {
+   fprintf(rwp_bulk_log,
+    "pc=0x%08X addr=0x%08X val=0x%08X width=%u frame=%llu\n",
+    pc, canonical, val, (unsigned)width,
+    (unsigned long long)frame_counter);
+  }
+
+  if (rwp_bit_test(oneshot, off)) {
+   rwp_bit_clear(watched, off);
+   rwp_bit_clear(oneshot, off);
+   (*count)--;
+   any_cleared = true;
+  }
+ }
+
+ if (any_cleared) {
+  // Flush eagerly on drain so a Ctrl-C / crash mid-sweep loses fewer hits.
+  if (rwp_bulk_log) fflush(rwp_bulk_log);
+  if (*count == 0) update_rwp_bulk_active();
+ }
+}
+
+void Automation_BulkReadWatchpointCheckLWR(uint32_t pc, uint32_t base_addr, uint32_t val, uint32_t width)
+{
+ if (rwp_lwr_count == 0 || !automation_active) return;
+ rwp_bulk_check_impl(RWP_REGION_LWR, pc, base_addr, val, width);
+}
+
+void Automation_BulkReadWatchpointCheckHWR(uint32_t pc, uint32_t base_addr, uint32_t val, uint32_t width)
+{
+ if (rwp_hwr_count == 0 || !automation_active) return;
+ rwp_bulk_check_impl(RWP_REGION_HWR, pc, base_addr, val, width);
 }
 
 static const char* exception_name(unsigned exnum)

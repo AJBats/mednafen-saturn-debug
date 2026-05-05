@@ -59,6 +59,13 @@ namespace MDFN_IEN_SS {
  void Automation_ClearReadWatchpoint(void);
  bool Automation_CheckReadWatchpointActive(void);
 
+ // Gates for bulk byte-resolution read-WPs (per region). The bitmap
+ // storage lives in drivers/automation.cpp; these bools fast-path the
+ // inline read checks in BusRW_DB_CS0 (LWR) and BusRW_DB_CS3 (HWR) when
+ // their region's bitmap is empty. A sweep loaded only into HWR pays no
+ // cost on LWR reads and vice versa.
+ void Automation_SetReadWatchpointBulkActive(bool lwr, bool hwr);
+
  // CD Block tracing
  void CDB_EnableSCDQTrace(const char* path);
  void CDB_DisableSCDQTrace(void);

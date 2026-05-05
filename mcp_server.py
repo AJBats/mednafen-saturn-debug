@@ -1041,6 +1041,143 @@ async def read_watchpoint_hits() -> str:
     return summary
 
 
+@mcp.tool()
+async def read_watchpoint_set_from_file(path: str,
+                                        result_path: str = "",
+                                        clear_existing: bool = False,
+                                        oneshot: bool = False) -> str:
+    """Bulk-install byte-resolution read-watchpoints from a text file (log mode).
+
+    File format mirrors breakpoint_set_from_file: one hex address per line
+    (optional 0x prefix), '#' starts a comment, blank lines OK. Each hit
+    appends ONE line to read_watchpoint_bulk_hits.txt:
+      pc=<load_pc> addr=<byte> val=<4byte_window> width=<bytes> frame=<N>
+    The pc= field is the load instruction's PC — the field needed to map
+    "which kept function reads this candidate-delete byte."
+
+    clear_existing=True removes prior bulk read-WPs and truncates the log
+    before installing. Per-line parse failures are non-fatal and listed in
+    the result JSON.
+
+    oneshot=True installs each entry to log on first hit then auto-erase.
+    Strongly recommended at scale (1000+ entries) — without it, the
+    per-memory-read hashtable lookup pins the emulator FPS until cleared.
+    With oneshot, the lookup overhead drains as coverage saturates and FPS
+    returns to native once the table empties.
+
+    This is independent of the singleton read_watchpoint command. Both can
+    coexist. Use read_watchpoint_hits_summary to aggregate hits by
+    (addr, pc) pairs, mirroring breakpoint_hits_summary."""
+    if not _alive():
+        return "FAIL: No session"
+    in_path = os.path.abspath(path)
+    if not os.path.exists(in_path):
+        return f"FAIL: input file not found: {in_path}"
+    out_path = os.path.abspath(result_path) if result_path else (in_path + ".result.json")
+    if os.path.normcase(in_path) == os.path.normcase(out_path):
+        return "FAIL: result_path must differ from input path (would overwrite input)"
+    out_dir = os.path.dirname(out_path) or "."
+    if not os.path.isdir(out_dir):
+        return f"FAIL: result_path directory does not exist: {out_dir}"
+
+    cmd = f"read_watchpoint_set_from_file {wsl_path(in_path)} {wsl_path(out_path)}"
+    if clear_existing:
+        cmd += " clear"
+    if oneshot:
+        cmd += " once"
+    ack = await _send_and_wait(cmd,
+                               ["ok read_watchpoint_set_from_file",
+                                "error read_watchpoint_set_from_file",
+                                "error unknown command"],
+                               timeout=60)
+    if not ack:
+        return "FAIL: read_watchpoint_set_from_file timed out"
+    if ack.startswith("ok read_watchpoint_set_from_file"):
+        return f"{ack} result_file={out_path}"
+    return ack
+
+
+@mcp.tool()
+async def read_watchpoint_bulk_clear() -> str:
+    """Remove all bulk read-watchpoints and close the bulk hit log."""
+    if not _alive():
+        return "FAIL: No session"
+    ack = await _send_and_wait("read_watchpoint_bulk_clear",
+                               "ok read_watchpoint_bulk_clear", timeout=5)
+    return ack if ack else "FAIL: timed out"
+
+
+@mcp.tool()
+async def read_watchpoint_hits_summary(result_path: str = "",
+                                       hits_path: str = "") -> str:
+    """Summarize a read_watchpoint_bulk_hits.txt log into a JSON file.
+
+    Aggregates by (addr, pc) pairs — i.e. for each watched byte, which load
+    PCs read it and how many times. Same shape as breakpoint_hits_summary
+    but keyed on the (addr, pc) pair so cross-function data dependencies
+    fall out directly.
+
+    hits_path defaults to the IPC-dir read_watchpoint_bulk_hits.txt written
+    by read_watchpoint_set_from_file. result_path defaults to
+    <hits_path>.summary.json.
+
+    Output JSON shape:
+      {
+        "hits_file": "...",
+        "total_hits": N,
+        "unique_addresses": N,
+        "unique_load_pcs": N,
+        "by_addr_pc": { "0xAAAAAAAA|0xBBBBBBBB": count, ... },
+        "by_address":  { "0xAAAAAAAA": total_hits_at_addr, ... },
+        "by_load_pc":  { "0xBBBBBBBB": total_hits_from_pc, ... }
+      }
+    The by_addr_pc key uses '|' as separator since JSON object keys must be
+    strings. Split on '|' for (addr, pc) tuples."""
+    if not hits_path:
+        if not _ipc_dir:
+            return "FAIL: no session / no default hits path; pass hits_path"
+        hits_path = os.path.join(_ipc_dir, "read_watchpoint_bulk_hits.txt")
+    hits_path = os.path.abspath(hits_path)
+    if not os.path.exists(hits_path):
+        return f"FAIL: hits file not found: {hits_path}"
+    out_path = os.path.abspath(result_path) if result_path else (hits_path + ".summary.json")
+
+    by_addr_pc: dict[str, int] = {}
+    by_address: dict[str, int] = {}
+    by_load_pc: dict[str, int] = {}
+    total_hits = 0
+    line_re = re.compile(
+        r"^pc=0x([0-9A-Fa-f]+)\s+addr=0x([0-9A-Fa-f]+)\s+val=0x[0-9A-Fa-f]+\s+width=\d+\s+frame=\d+"
+    )
+    with open(hits_path, encoding="utf-8", errors="replace") as f:
+        for line in f:
+            m = line_re.match(line)
+            if not m:
+                continue
+            pc = "0x" + m.group(1).upper().zfill(8)
+            addr = "0x" + m.group(2).upper().zfill(8)
+            key = f"{addr}|{pc}"
+            by_addr_pc[key] = by_addr_pc.get(key, 0) + 1
+            by_address[addr] = by_address.get(addr, 0) + 1
+            by_load_pc[pc] = by_load_pc.get(pc, 0) + 1
+            total_hits += 1
+
+    summary = {
+        "hits_file": hits_path,
+        "total_hits": total_hits,
+        "unique_addresses": len(by_address),
+        "unique_load_pcs": len(by_load_pc),
+        "by_addr_pc": dict(sorted(by_addr_pc.items(), key=lambda kv: kv[1], reverse=True)),
+        "by_address": dict(sorted(by_address.items(), key=lambda kv: kv[1], reverse=True)),
+        "by_load_pc": dict(sorted(by_load_pc.items(), key=lambda kv: kv[1], reverse=True)),
+    }
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2)
+    return (f"ok read_watchpoint_hits_summary total_hits={total_hits} "
+            f"unique_addresses={len(by_address)} unique_load_pcs={len(by_load_pc)} "
+            f"result_file={out_path}")
+
+
 # ---------------------------------------------------------------------------
 # Exception handling
 # ---------------------------------------------------------------------------

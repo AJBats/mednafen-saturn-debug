@@ -59,6 +59,8 @@ using namespace Mednafen;
 bool Automation_DebugHook(uint32_t pc);
 void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint32_t new_val, uint32_t pr, const char* source);
 void Automation_ReadWatchpointHit(uint32_t pc, uint32_t addr, uint32_t val, uint32_t pr);
+void Automation_BulkReadWatchpointCheckLWR(uint32_t pc, uint32_t base_addr, uint32_t val, uint32_t width);
+void Automation_BulkReadWatchpointCheckHWR(uint32_t pc, uint32_t base_addr, uint32_t val, uint32_t width);
 void Automation_ExceptionHit(unsigned exnum, unsigned vecnum, uint32_t pc, uint32_t sr, uint32_t r15, uint32_t pr, uint32_t vbr, uint32_t handler_pc);
 
 namespace MDFN_IEN_SS
@@ -230,6 +232,14 @@ static uint32 automation_wp_filter_value = 0;     // Value to match (when filter
 // Same behavior as write watchpoints — pauses on hit, reports context.
 static bool automation_rwp_active = false;
 static uint32 automation_rwp_addr = 0;      // Work RAM offset (masked to 0xFFFFF)
+
+// Bulk read-WP gates, one per region. Set true when the corresponding
+// region's bitmap in drivers/automation.cpp has any bits set; the inline
+// LWR/HWR read paths short-circuit on this when false. A sweep loaded only
+// into HWR pays no cost on LWR reads and vice versa. Toggled via
+// Automation_SetReadWatchpointBulkActive(lwr, hwr).
+static bool automation_rwp_bulk_lwr_active = false;
+static bool automation_rwp_bulk_hwr_active = false;
 static bool automation_rwp_is_lwr = false;  // true = Low Work RAM (CS0), false = High Work RAM (CS3)
 static bool automation_rwp_paused = false;   // true when paused on read watchpoint hit
 
@@ -388,6 +398,15 @@ static INLINE void BusRW_DB_CS0(const uint32 A, uint32& DB, const bool BurstHax,
     uint32 val = ne16_rbo_be<uint32>(WorkRAML, automation_rwp_addr & 0xFFFFC);
     ::Automation_ReadWatchpointHit(CPU[automation_current_cpu].PC, A, val, CPU[automation_current_cpu].PR);
    }
+  }
+
+  // Automation: bulk read-watchpoints (byte-resolution, log-only, bitmap)
+  if(!IsWrite && MDFN_UNLIKELY(automation_rwp_bulk_lwr_active))
+  {
+   // Pass the 4-byte aligned window value as 'val' so the log carries the
+   // wider context the caller can decode for narrower accesses.
+   uint32 val = ne16_rbo_be<uint32>(WorkRAML, A & 0xFFFFC);
+   ::Automation_BulkReadWatchpointCheckLWR(CPU[automation_current_cpu].PC, A, val, sizeof(T));
   }
 
   return;
@@ -580,6 +599,13 @@ static INLINE void BusRW_DB_CS3(const uint32 A, uint32& DB, const bool BurstHax,
    uint32 val = ne16_rbo_be<uint32>(WorkRAMH, automation_rwp_addr & 0xFFFFC);
    ::Automation_ReadWatchpointHit(CPU[automation_current_cpu].PC, A, val, CPU[automation_current_cpu].PR);
   }
+ }
+
+ // Automation: bulk read-watchpoints (byte-resolution, log-only, bitmap)
+ if(!IsWrite && MDFN_UNLIKELY(automation_rwp_bulk_hwr_active))
+ {
+  uint32 val = ne16_rbo_be<uint32>(WorkRAMH, A & 0xFFFFC);
+  ::Automation_BulkReadWatchpointCheckHWR(CPU[automation_current_cpu].PC, A, val, sizeof(T));
  }
 }
 
@@ -1016,6 +1042,12 @@ void Automation_ClearReadWatchpoint(void)
 {
  automation_rwp_active = false;
  automation_rwp_is_lwr = false;
+}
+
+void Automation_SetReadWatchpointBulkActive(bool lwr, bool hwr)
+{
+ automation_rwp_bulk_lwr_active = lwr;
+ automation_rwp_bulk_hwr_active = hwr;
 }
 
 bool Automation_CheckReadWatchpointActive(void)

@@ -201,6 +201,10 @@ lines use lowercase `m/s` with additional fields: `<timestamp> m/s <PC-4> <opcod
 |---------|-------------|
 | `watchpoint <addr>` | Watch for 4-byte writes to addr (hex) |
 | `watchpoint_clear` | Remove watchpoint |
+| `read_watchpoint <addr> [log]` | Watch for reads from addr (hex). Pause-mode by default; `log` = log-only. Singleton — one address at a time. |
+| `read_watchpoint_clear` | Remove the singleton read-watchpoint |
+| `read_watchpoint_set_from_file <input> <result> [clear] [once]` | Bulk install byte-resolution read-WPs in log mode. Each hit appends one line to `read_watchpoint_bulk_hits.txt`: `pc=<load_pc> addr=<byte> val=<4byte_window> width=<bytes> frame=<N>`. The `pc=` is the load instruction PC (the field needed to map cross-function data dependencies). `once` recommended for >1000 entries — drains the per-read lookup cost as coverage saturates. |
+| `read_watchpoint_bulk_clear` | Remove all bulk read-watchpoints + close the bulk hit log |
 | `vdp2_watchpoint <lo> <hi> <path>` | Watch for writes to VDP2 address range (hex), log to file |
 | `vdp2_watchpoint_clear` | Remove VDP2 watchpoint |
 
