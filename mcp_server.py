@@ -540,7 +540,9 @@ async def breakpoint_set(address: str,
     + isr) that haven't been seen yet at this BP. For entry-classification
     sweeps where a hallucinated body label might be reached by fall-through
     first and a real JSR caller later — both fires get logged, no masking.
-    Mutually exclusive with oneshot in semantics."""
+
+    Passing both oneshot=True and dedupe=True is rejected with an error
+    (the two are semantically incompatible)."""
     if not _alive():
         return "FAIL: No session"
     addr = _strip_hex(address)
@@ -631,8 +633,10 @@ async def breakpoint_set_from_file(path: str,
     path keeps per-instruction overhead near-free regardless of how many BPs
     are armed, so dedupe sweeps don't suffer the 1FPS oneshot was originally
     motivated by — they can stay armed for the entire session. Use this for
-    FUN_X entry-classification sweeps. Mutually exclusive with oneshot in
-    semantics.
+    FUN_X entry-classification sweeps.
+
+    Passing both oneshot=True and dedupe=True is rejected with an error
+    (the two are semantically incompatible).
 
     Side effect: enabling log mode is a session-global flip. Any breakpoints
     previously installed in pause mode (plain `breakpoint_set(..., log=False)`)

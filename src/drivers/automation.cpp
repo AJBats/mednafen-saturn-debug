@@ -260,11 +260,18 @@ struct BPEntry {
  std::unique_ptr<std::unordered_set<uint64_t>> seen;
 };
 
-// Breakpoint table. Map keyed by PC, value is BPEntry. Re-installing the
-// same address OR-merges flags. On a oneshot hit the entry is erased and
-// update_cpu_hook() is called — once the table empties, the per-instruction
-// debug hook self-disables. Dedupe entries persist forever and rely on the
-// signature set to suppress duplicate log lines.
+// Breakpoint table. Map keyed by canonicalized PC (bp_key strips cache-
+// region bits so all mirrors of the same physical address share one entry).
+// Re-installing the same address OR-merges flags, with one exception: if
+// the merged flags would have BP_DEDUPE set, BP_ONESHOT is cleared since
+// the two are semantically incompatible. Singleton-command callers that
+// pass both flags get an error instead of the strip; the strip handles the
+// progressive-merge case (install with `once`, then later add `dedupe`).
+//
+// On a oneshot hit the entry is erased and update_cpu_hook() is called —
+// once the table empties, the per-instruction debug hook self-disables.
+// Dedupe entries persist forever and rely on the signature set to suppress
+// duplicate log lines.
 static std::unordered_map<uint32_t, BPEntry> breakpoints;
 
 // Per-instruction BP fast-path bitmap (LWR + HWR). Replaces a per-instruction
@@ -302,18 +309,28 @@ static inline void bp_bit_clear(uint8_t* bm, uint32_t off) {
  bm[off >> 3] &= (uint8_t)~(1u << (off & 7));
 }
 
+// Canonical BP key. SH-2 address bits 28-31 select cache region (P0 cached,
+// P2 uncached, etc.) but for RAM these all alias the same physical memory.
+// A BP installed at 0x06036BB8 must also fire when execution arrives via
+// the uncached mirror 0x26036BB8. The bitmap already folds mirrors via
+// bp_classify; we apply the same mask to the unordered_map key so the slow
+// path stays consistent. Used at install, remove, and lookup sites.
+static inline uint32_t bp_key(uint32_t addr) {
+ return addr & 0x0FFFFFFF;
+}
+
 // Classify a BP address into (region, region-relative offset). Returns
 // BP_REGION_NONE for BIOS / cart / etc. — those go through the slow-path
-// unordered_map find(). Mirrors the bulk read-WP rwp_classify().
+// unordered_map find(). Mirrors the bulk read-WP rwp_classify(). Caller is
+// expected to pass an already-canonicalized address from bp_key().
 enum BpRegion { BP_REGION_NONE = 0, BP_REGION_LWR = 1, BP_REGION_HWR = 2 };
 static BpRegion bp_classify(uint32_t addr, uint32_t* offset_out) {
- uint32_t masked = addr & 0x0FFFFFFF;
- if (masked >= BP_LWR_BASE && masked <= BP_LWR_END) {
-  *offset_out = masked & BP_REGION_MASK;
+ if (addr >= BP_LWR_BASE && addr <= BP_LWR_END) {
+  *offset_out = addr & BP_REGION_MASK;
   return BP_REGION_LWR;
  }
- if (masked >= BP_HWR_BASE && masked <= BP_HWR_END) {
-  *offset_out = masked & BP_REGION_MASK;
+ if (addr >= BP_HWR_BASE && addr <= BP_HWR_END) {
+  *offset_out = addr & BP_REGION_MASK;
   return BP_REGION_HWR;
  }
  return BP_REGION_NONE;
@@ -330,6 +347,7 @@ static BpRegion bp_classify(uint32_t addr, uint32_t* offset_out) {
 // on first fire"). If a caller passes both, we strip BP_ONESHOT so the
 // dedupe contract is honored.
 static bool bp_install(uint32_t addr, uint8_t flags) {
+ addr = bp_key(addr);
  if ((flags & BP_DEDUPE) && (flags & BP_ONESHOT))
   flags &= (uint8_t)~BP_ONESHOT;
 
@@ -359,6 +377,7 @@ static bool bp_install(uint32_t addr, uint8_t flags) {
 
 // Atomic remove. Returns the number of entries erased (0 or 1).
 static size_t bp_remove(uint32_t addr) {
+ addr = bp_key(addr);
  auto it = breakpoints.find(addr);
  if (it == breakpoints.end()) return 0;
  breakpoints.erase(it);
@@ -384,11 +403,15 @@ static void bp_clear_all(void) {
 
 // Bitmap-only fast probe: returns true if there's a chance of a BP at pc or
 // pc-2 in any active region. Caller still consults the unordered_map for the
-// BPEntry on a probe-positive. False positives are impossible (bits are only
-// set when a BP is installed); false negatives are impossible (bits stay set
-// until the BP is removed). Inlined into the hot path.
+// BPEntry on a probe-positive. The probe is mirror-folding via bp_key —
+// a BP installed at 0x06036BB8 also probes-positive when the hook fires at
+// the uncached mirror 0x26036BB8. False positives can otherwise occur from
+// two distinct PCs hashing to the same canonicalized key (e.g. cache mirrors
+// of the same physical address); the slow path's find() will return a real
+// BPEntry in that case since the map is also keyed canonically. False
+// negatives are impossible — bits stay set until the BP is removed.
 static inline bool bp_bitmap_probe(uint32_t pc) {
- uint32_t pc_masked = pc & 0x0FFFFFFF;
+ uint32_t pc_masked = bp_key(pc);
  if (bp_lwr_count && pc_masked >= BP_LWR_BASE && pc_masked <= BP_LWR_END) {
   uint32_t off = pc_masked & BP_REGION_MASK;
   if (bp_bit_test(bp_bitmap_lwr, off)) return true;
@@ -1021,7 +1044,7 @@ static void process_command(const std::string& line)
   //   dedupe = persistent BP that logs only unique callstack signatures.
   //            For entry-classification: oneshot would mask later real
   //            callers by clearing on first (possibly fall-through) hit.
-  //            Mutually exclusive with `once` in semantics.
+  //   `once` and `dedupe` are mutually exclusive — passing both is an error.
   uint32_t addr = 0;
   iss >> std::hex >> addr;
   uint8_t flags = 0;
@@ -1031,6 +1054,10 @@ static void process_command(const std::string& line)
    if (token == "log") log_flag = true;
    else if (token == "once" || token == "oneshot") flags |= BP_ONESHOT;
    else if (token == "dedupe" || token == "dedup")  flags |= BP_DEDUPE;
+  }
+  if ((flags & BP_ONESHOT) && (flags & BP_DEDUPE)) {
+   write_ack("error breakpoint: `once` and `dedupe` are mutually exclusive");
+   return;
   }
   if (log_flag) {
    breakpoint_log_mode = true;
@@ -1128,6 +1155,11 @@ static void process_command(const std::string& line)
    if (opt_tok == "clear") clear_existing = true;
    else if (opt_tok == "once" || opt_tok == "oneshot") default_flags |= BP_ONESHOT;
    else if (opt_tok == "dedupe" || opt_tok == "dedup") default_flags |= BP_DEDUPE;
+  }
+
+  if ((default_flags & BP_ONESHOT) && (default_flags & BP_DEDUPE)) {
+   write_ack("error breakpoint_set_from_file: `once` and `dedupe` are mutually exclusive");
+   return;
   }
 
   if (input_path.empty() || result_path.empty()) {
@@ -2495,6 +2527,10 @@ void Automation_Kill(void)
  rwp_lwr_count = 0;
  rwp_hwr_count = 0;
  update_rwp_bulk_active();
+ // Same lifecycle treatment for the BP table + bitmap. Without this, a
+ // re-init in the same process can see stale entries — and worse, the
+ // bitmap and unordered_map could disagree depending on which got reset.
+ bp_clear_all();
  if (bp_log) { fclose(bp_log); bp_log = nullptr; }
  if (exc_log) { fclose(exc_log); exc_log = nullptr; }
  poke_triggers.clear();
@@ -2981,11 +3017,17 @@ bool Automation_DebugHook(uint32_t pc)
  uint32_t bp_addr = pc;
  auto bp_it = breakpoints.end();
  if (bp_bitmap_probe(pc) || bp_other_count > 0) {
-  bp_it = breakpoints.find(pc);
+  // Canonicalize for the map lookup so a BP installed at 0x06036BB8 fires
+  // when the hook arrives via a cache-region mirror like 0x26036BB8. The
+  // bitmap probe already folds mirrors; the unordered_map keys do too via
+  // bp_install/bp_remove using bp_key().
+  const uint32_t key0 = bp_key(pc);
+  const uint32_t key2 = bp_key(pc - 2);
+  bp_it = breakpoints.find(key0);
   if (bp_it != breakpoints.end()) {
    bp_hit = true;
   } else {
-   bp_it = breakpoints.find(pc - 2);
+   bp_it = breakpoints.find(key2);
    if (bp_it != breakpoints.end()) {
     bp_hit = true;
     bp_addr = pc - 2;
