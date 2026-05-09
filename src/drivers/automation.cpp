@@ -2437,9 +2437,15 @@ void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint
     fprintf(wp_log, "# Watchpoint hits for addr 0x%08X\n", watchpoint_addr);
   }
  }
+ char prev_buf[96];
+ // WP fires can come from either CPU's bus access; route via the same
+ // bus-cpu heuristic Automation_CallStack uses.
+ MDFN_IEN_SS::Automation_FormatPrevPCLine(MDFN_IEN_SS::Automation_GetCurrentBusCPU(),
+                                          prev_buf, sizeof(prev_buf));
+
  if (wp_log) {
-  fprintf(wp_log, "pc=0x%08X pr=0x%08X addr=0x%08X old=0x%08X new=0x%08X source=%s frame=%llu\n",
-   pc, pr, addr, old_val, new_val, source, (unsigned long long)frame_counter);
+  fprintf(wp_log, "pc=0x%08X pr=0x%08X addr=0x%08X old=0x%08X new=0x%08X source=%s frame=%llu %s\n",
+   pc, pr, addr, old_val, new_val, source, (unsigned long long)frame_counter, prev_buf);
   fflush(wp_log);
  }
 
@@ -2453,7 +2459,7 @@ void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint
   if (wp_log) {
    std::string regs = MDFN_IEN_SS::Automation_DumpRegs();
    std::string stack = MDFN_IEN_SS::Automation_CallStack(0x400);
-   fprintf(wp_log, "--- %s ---\n%s\n%s\n", msg, regs.c_str(), stack.c_str());
+   fprintf(wp_log, "--- %s ---\n%s\n%s\n%s\n", msg, regs.c_str(), stack.c_str(), prev_buf);
    fflush(wp_log);
   }
   return;
@@ -2478,6 +2484,8 @@ void Automation_WatchpointHit(uint32_t pc, uint32_t addr, uint32_t old_val, uint
 
  full_msg += "\n" + MDFN_IEN_SS::Automation_DumpRegs();
  full_msg += "\n" + MDFN_IEN_SS::Automation_CallStack(0x400);
+ full_msg += "\n";
+ full_msg += prev_buf;
  write_ack(full_msg);
 
  watchpoint_paused = true;
@@ -2506,6 +2514,10 @@ void Automation_ReadWatchpointHit(uint32_t pc, uint32_t addr, uint32_t val, uint
    fprintf(rwp_log, "# Read watchpoint hits for addr 0x%08X\n", read_watchpoint_addr);
  }
 
+ char prev_buf[96];
+ MDFN_IEN_SS::Automation_FormatPrevPCLine(MDFN_IEN_SS::Automation_GetCurrentBusCPU(),
+                                          prev_buf, sizeof(prev_buf));
+
  char msg[256];
  snprintf(msg, sizeof(msg),
   "hit read_watchpoint pc=0x%08X pr=0x%08X addr=0x%08X val=0x%08X frame=%llu",
@@ -2516,7 +2528,7 @@ void Automation_ReadWatchpointHit(uint32_t pc, uint32_t addr, uint32_t val, uint
   if (rwp_log) {
    std::string regs = MDFN_IEN_SS::Automation_DumpRegs();
    std::string stack = MDFN_IEN_SS::Automation_CallStack(0x400);
-   fprintf(rwp_log, "--- %s ---\n%s\n%s\n", msg, regs.c_str(), stack.c_str());
+   fprintf(rwp_log, "--- %s ---\n%s\n%s\n%s\n", msg, regs.c_str(), stack.c_str(), prev_buf);
    fflush(rwp_log);
   }
   return;
@@ -2524,8 +2536,8 @@ void Automation_ReadWatchpointHit(uint32_t pc, uint32_t addr, uint32_t val, uint
 
  // Pause mode: log summary line then ack + spin-wait
  if (rwp_log) {
-  fprintf(rwp_log, "pc=0x%08X pr=0x%08X addr=0x%08X val=0x%08X frame=%llu\n",
-   pc, pr, addr, val, (unsigned long long)frame_counter);
+  fprintf(rwp_log, "pc=0x%08X pr=0x%08X addr=0x%08X val=0x%08X frame=%llu %s\n",
+   pc, pr, addr, val, (unsigned long long)frame_counter, prev_buf);
   fflush(rwp_log);
  }
 
@@ -2545,6 +2557,8 @@ void Automation_ReadWatchpointHit(uint32_t pc, uint32_t addr, uint32_t val, uint
 
  full_msg += "\n" + MDFN_IEN_SS::Automation_DumpRegs();
  full_msg += "\n" + MDFN_IEN_SS::Automation_CallStack(0x400);
+ full_msg += "\n";
+ full_msg += prev_buf;
  write_ack(full_msg);
 
  read_watchpoint_paused = true;
@@ -2588,10 +2602,13 @@ static void rwp_bulk_check_impl(RwpRegion region, uint32_t pc, uint32_t base_add
 
   uint32_t canonical = region_base | off;
   if (rwp_bulk_log) {
+   char prev_buf[96];
+   MDFN_IEN_SS::Automation_FormatPrevPCLine(MDFN_IEN_SS::Automation_GetCurrentBusCPU(),
+                                            prev_buf, sizeof(prev_buf));
    fprintf(rwp_bulk_log,
-    "pc=0x%08X addr=0x%08X val=0x%08X width=%u frame=%llu\n",
+    "pc=0x%08X addr=0x%08X val=0x%08X width=%u frame=%llu %s\n",
     pc, canonical, val, (unsigned)width,
-    (unsigned long long)frame_counter);
+    (unsigned long long)frame_counter, prev_buf);
   }
 
   if (rwp_bit_test(oneshot, off)) {
@@ -2840,8 +2857,12 @@ bool Automation_DebugHook(uint32_t pc)
   if (bp_log) {
    std::string regs = MDFN_IEN_SS::Automation_DumpRegs();
    std::string stack = MDFN_IEN_SS::Automation_CallStack(0x400);
-   fprintf(bp_log, "--- break pc=0x%08X addr=0x%08X frame=%llu ---\n%s\n%s\n",
-    pc, bp_addr, (unsigned long long)frame_counter, regs.c_str(), stack.c_str());
+   char prev_buf[96];
+   // BPs only fire on the master CPU (Automation_DebugHook is invoked
+   // exclusively from the master inline hook), so always render master ring.
+   MDFN_IEN_SS::Automation_FormatPrevPCLine(0, prev_buf, sizeof(prev_buf));
+   fprintf(bp_log, "--- break pc=0x%08X addr=0x%08X frame=%llu ---\n%s\n%s\n%s\n",
+    pc, bp_addr, (unsigned long long)frame_counter, regs.c_str(), stack.c_str(), prev_buf);
    fflush(bp_log);
   }
   // If ONLY a breakpoint hit (not also cycle/step), don't pause

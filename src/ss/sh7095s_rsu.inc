@@ -22,6 +22,17 @@
 
  do
  {
+  // Slave-side prev-PC ring + ISR depth tracker. Mirrors the master-CPU
+  // inline hook in ss.cpp (RunLoop_INLINE), which only fires when DebugMode
+  // is false. Mirroring that gate keeps the master and slave rings updating
+  // in lockstep — both update during normal automation runs, both stop
+  // updating when Mednafen's GUI debugger is active (DebugMode=true), at
+  // which point automation BP/WP fires don't fire either, so a stale ring
+  // is moot. !DebugMode resolves to a compile-time constant per template
+  // instantiation, so this gate has zero runtime cost in the debug build.
+  if(!DebugMode && MDFN_UNLIKELY(s_automation_inline_hook != nullptr))
+   PrevPC_PushAndAdvance(1, PC);
+
   if(DebugMode)
   {
    if(MDFN_LIKELY(ResumeTableP[DebugMode]))

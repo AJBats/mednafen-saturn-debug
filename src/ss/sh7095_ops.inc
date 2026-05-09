@@ -1695,6 +1695,13 @@ switch(Pipe_ID >> 24)
 
 	timestamp++;
 
+	// Schedule the in_isr depth decrement to apply two hook firings from
+	// now — i.e., AFTER RTE's delay slot has retired. This keeps the
+	// delay-slot instruction reporting in_isr>=1 (it is still part of the
+	// ISR's instruction stream) while the first instruction at the resumed
+	// address reports the decremented value.
+	PrevPC_OnRTE(which);
+
 	DelayBranch(opexec_new_PC);
  END_OP
 

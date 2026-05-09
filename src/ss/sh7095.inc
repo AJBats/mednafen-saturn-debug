@@ -3425,6 +3425,11 @@ static const uint8 InstrDecodeTab[65536] =
  timestamp += 2;							\
  timestamp = std::max<sscpu_timestamp_t>(MA_until, timestamp);		\
 									\
+ /* Bump the per-CPU in_isr depth counter for every exception (including */ \
+ /* regular interrupts, EXCEPTION_INT=9). Decremented two hook firings   */ \
+ /* after the matching RTE so the delay slot still reports in_isr>=1.    */ \
+ PrevPC_OnException(which);						\
+									\
  if((unsigned)(exnum) != 9) /* skip regular interrupts (EXCEPTION_INT=9) */ \
   fprintf(stderr, "[SH2-EXCEPTION] %s: exnum=%u vecnum=0x%02x PC=0x%08x SR=0x%08x R15=0x%08x PR=0x%08x VBR=0x%08x\n", \
          cpu_name, (unsigned)(exnum), (unsigned)(vecnum), PC, SR, R[15], PR, VBR); \

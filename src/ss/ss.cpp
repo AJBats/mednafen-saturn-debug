@@ -219,6 +219,117 @@ static void ShadowStack_FPrint(FILE* f, unsigned cpu)
  }
 }
 
+// Automation: per-CPU ring buffer of the last N retired PCs, plus ISR-active
+// depth counter. Together these let an offline classifier distinguish how
+// control reached a BP target — direct call (JSR/BSR/BSRF), tail call (BRA/
+// BRAF/JMP), fall-through, or interrupt vector — by decoding the instruction
+// at one of the prior PCs and consulting in_isr.
+//
+// Captured only while the inline hook is active (s_automation_inline_hook
+// non-null), so there is zero per-instruction cost when no BP/WP run is in
+// flight. State is reset on hook enable, on system reset, and on state load.
+static constexpr unsigned PREV_PC_RING_DEPTH = 4;
+static uint32 s_prev_pc_ring[2][PREV_PC_RING_DEPTH] = {{0}};
+static uint8  s_prev_pc_head[2] = {0, 0};      // index of next slot to write
+static uint32 s_last_step_pc[2] = {0, 0};      // PC observed at previous hook firing
+static bool   s_last_step_pc_valid[2] = {false, false};
+
+// ISR depth counter: bumped on every Exception (including INT/9), decremented
+// the second hook firing after RTE's op runs — i.e., AFTER RTE's delay slot
+// has retired. The 2-step countdown is what makes the delay slot itself
+// report in_isr=1 (semantically still inside the ISR), while the first
+// instruction at the resumed address reports in_isr=0.
+static uint32 s_isr_depth[2] = {0, 0};
+static uint32 s_isr_pending_dec_steps[2] = {0, 0};
+
+static INLINE void PrevPC_Reset(void)
+{
+ for(unsigned c = 0; c < 2; c++)
+ {
+  for(unsigned i = 0; i < PREV_PC_RING_DEPTH; i++)
+   s_prev_pc_ring[c][i] = 0;
+  s_prev_pc_head[c] = 0;
+  s_last_step_pc[c] = 0;
+  s_last_step_pc_valid[c] = false;
+  s_isr_depth[c] = 0;
+  s_isr_pending_dec_steps[c] = 0;
+ }
+}
+
+// Called from the master inline hook and the slave dispatch loop, BEFORE
+// each instruction's Step. Pushes the address of the instruction that just
+// retired (= `cur_pc - 4` per the codebase-wide convention; see InsnTrace
+// in sh7095.inc and ShadowStack_Push call_site values for BSR/BSRF/JSR)
+// into the ring, then records the current PC for next time. Also services
+// the post-RTE isr_depth decrement countdown.
+//
+// Caveat — the immediate-after-delay-branch hook firing has PC = target+2,
+// so `cur_pc - 4` for that one slot stores `target - 2`, which is NOT the
+// delay slot's true address. The classifier only needs prev_pc[0] (the
+// branch instruction itself, which is captured correctly by the deferred
+// push) to discriminate call/tail/fall-through, so this off-slot is
+// acceptable per the feature spec.
+static INLINE void PrevPC_PushAndAdvance(unsigned cpu, uint32 cur_pc)
+{
+ const uint32 dispatch_addr = cur_pc - 4;
+
+ if(s_last_step_pc_valid[cpu])
+ {
+  s_prev_pc_ring[cpu][s_prev_pc_head[cpu]] = s_last_step_pc[cpu];
+  s_prev_pc_head[cpu] = (s_prev_pc_head[cpu] + 1) & (PREV_PC_RING_DEPTH - 1);
+ }
+ s_last_step_pc[cpu] = dispatch_addr;
+ s_last_step_pc_valid[cpu] = true;
+
+ if(s_isr_pending_dec_steps[cpu] > 0)
+ {
+  s_isr_pending_dec_steps[cpu]--;
+  if(s_isr_pending_dec_steps[cpu] == 0 && s_isr_depth[cpu] > 0)
+   s_isr_depth[cpu]--;
+ }
+}
+
+// Called from the Exception macro on every interrupt/exception entry. Gated
+// on the hook being active — when the hook is off we don't need the depth
+// counter anyway, and tracking it across hook on/off cycles would corrupt
+// the value (we'd rely on RTE-side decrement which is also gated).
+// Consequence: enabling the hook mid-ISR produces isr_depth=0 until the
+// matching RTE; subsequent IRQs are tracked correctly. Acceptable for v1.
+static INLINE void PrevPC_OnException(unsigned cpu)
+{
+ if(s_automation_inline_hook != nullptr)
+  s_isr_depth[cpu]++;
+}
+
+// Called from the RTE op handler. Schedules an in_isr decrement two hook
+// firings out: one for RTE's delay slot, one for the first post-resume
+// instruction. The decrement actually applies on the second of those two
+// (so the delay slot still reports in_isr>=1).
+static INLINE void PrevPC_OnRTE(unsigned cpu)
+{
+ if(s_automation_inline_hook != nullptr)
+  s_isr_pending_dec_steps[cpu] = 2;
+}
+
+// Format helper: renders
+//   "prev_pc=0xAA,0xBB,0xCC,0xDD isr_depth=N"
+// into out. Most-recent first: prev_pc[0] is the immediately-previous
+// retired instruction's address. isr_depth is the ISR nesting count
+// (0 = not in any ISR, 1 = inside one ISR, 2+ = nested). Returns the
+// number of characters written (excluding NUL).
+static size_t PrevPC_FormatLine(unsigned cpu, char* out, size_t outsz)
+{
+ const uint8 head = s_prev_pc_head[cpu];
+ const uint32 p0 = s_prev_pc_ring[cpu][(head - 1) & (PREV_PC_RING_DEPTH - 1)];
+ const uint32 p1 = s_prev_pc_ring[cpu][(head - 2) & (PREV_PC_RING_DEPTH - 1)];
+ const uint32 p2 = s_prev_pc_ring[cpu][(head - 3) & (PREV_PC_RING_DEPTH - 1)];
+ const uint32 p3 = s_prev_pc_ring[cpu][(head - 4) & (PREV_PC_RING_DEPTH - 1)];
+ int n = snprintf(out, outsz,
+  "prev_pc=0x%08X,0x%08X,0x%08X,0x%08X isr_depth=%u",
+  p0, p1, p2, p3, (unsigned)s_isr_depth[cpu]);
+ return (n < 0) ? 0 : (size_t)n;
+}
+
 // Automation: memory write watchpoint state.
 // Placed before scu.inc so both BusRW_DB_CS3, SCU DMA_Write, and BBusRW_DB can access.
 static bool automation_wp_active = false;
@@ -992,17 +1103,45 @@ void Automation_DumpVDP2RegsBin(const char* path)
 static void Automation_InlineHookCallback(void)
 {
  uint32 pc = Automation_GetMasterPC();
+ PrevPC_PushAndAdvance(0, pc);
  ::Automation_DebugHook(pc);
 }
 
 void Automation_EnableCPUHook(void)
 {
+ // Reset the prev-PC ring + ISR state so the first BP fires with clean
+ // values rather than carry-over from a previous run.
+ PrevPC_Reset();
  s_automation_inline_hook = Automation_InlineHookCallback;
 }
 
 void Automation_DisableCPUHook(void)
 {
  s_automation_inline_hook = nullptr;
+}
+
+// Public accessor used by the breakpoint / watchpoint logging paths to
+// append "prev_pc=... isr_depth=..." to their hit lines. The cpu argument
+// is required because the right value differs per call site:
+//   - BP fires: master only (Automation_DebugHook is invoked exclusively
+//     from the master inline hook), so callers pass cpu=0.
+//   - Watchpoint fires: route via automation_current_cpu, which is set
+//     per bus access (master/slave/DMA) — same heuristic Automation_CallStack
+//     uses. Pass Automation_GetCurrentBusCPU() to mirror it.
+// Out-of-range cpu values are clamped to master (0).
+size_t Automation_FormatPrevPCLine(unsigned cpu, char* out, size_t outsz)
+{
+ if(cpu > 1)
+  cpu = 0;
+ return PrevPC_FormatLine(cpu, out, outsz);
+}
+
+// Returns the CPU index of the most recent bus accessor (0=master, 1=slave),
+// defaulting to master for DMA/unknown. Matches the heuristic used by
+// Automation_CallStack and the existing watchpoint hit dispatchers.
+unsigned Automation_GetCurrentBusCPU(void)
+{
+ return (automation_current_cpu < 2) ? automation_current_cpu : 0;
 }
 
 void Automation_SetWatchpoint(uint32 addr)
@@ -1704,6 +1843,7 @@ void SS_Reset(bool powering_up)
 {
  SH7095_BusLock = 0;
  shadow_stack_depth[0] = shadow_stack_depth[1] = 0;
+ PrevPC_Reset();
 
  if(powering_up)
  {
@@ -3140,6 +3280,7 @@ static MDFN_COLD void StateAction(StateMem* sm, const unsigned load, const bool 
   CPU[1].PostStateLoad(load, RecordedNeedEmuICache, NeedEmuICache);
 
   shadow_stack_depth[0] = shadow_stack_depth[1] = 0;
+  PrevPC_Reset();
  }
 }
 

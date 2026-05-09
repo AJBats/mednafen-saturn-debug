@@ -40,6 +40,20 @@ namespace MDFN_IEN_SS {
  uint32 Automation_GetMasterSR(void);
  void Automation_SetMasterSR(uint32 val);
 
+ // Per-CPU prev-PC ring + ISR depth, formatted for BP/WP/RWP hit logs.
+ // Writes "prev_pc=0xAA,0xBB,0xCC,0xDD isr_depth=N" into out.
+ //   cpu: 0=master, 1=slave (out-of-range clamped to master).
+ // BP fires should pass 0 (Automation_DebugHook is master-only).
+ // WP fires should pass Automation_GetCurrentBusCPU() to mirror the
+ // automation_current_cpu heuristic used by Automation_CallStack.
+ // Returns chars written (excl. NUL).
+ size_t Automation_FormatPrevPCLine(unsigned cpu, char* out, size_t outsz);
+
+ // Returns the CPU index of the most recent bus accessor (0=master, 1=slave),
+ // defaulting to master for DMA/unknown. Matches the heuristic Automation_CallStack
+ // uses; intended for watchpoint hit emitters to pick the right prev-PC ring.
+ unsigned Automation_GetCurrentBusCPU(void);
+
  // Call tracing
  void Automation_EnableCallTrace(const char* path);
  void Automation_DisableCallTrace(void);
