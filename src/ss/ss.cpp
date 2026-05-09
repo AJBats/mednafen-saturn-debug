@@ -311,6 +311,42 @@ static INLINE void PrevPC_OnRTE(unsigned cpu)
   s_isr_pending_dec_steps[cpu] = 2;
 }
 
+// Compute a 64-bit signature hash for the current control-flow context at
+// CPU `cpu`. Mixes (isr-active flag, prev_pc[0], shadow-stack depth, full
+// shadow-stack target chain). Used by BP_DEDUPE to drop repeat fires of
+// the same logical entry-mode on a persistent BP. FNV-1a; collision risk
+// across realistic signature counts (~thousands per BP) is negligible.
+static uint64 ComputeBPSignatureFor(unsigned cpu)
+{
+ uint64 h = 0xcbf29ce484222325ULL;  // FNV offset basis
+ auto mix = [&h](uint64 v) {
+  h ^= v;
+  h *= 0x100000001b3ULL;
+ };
+
+ // Distinguish in-ISR vs not-in-ISR — interrupt-vectored entries are
+ // always "real" entries by construction, but they should still hash
+ // distinctly from the same callstack reached without an interrupt.
+ mix(s_isr_depth[cpu] > 0 ? 1ULL : 0ULL);
+
+ // prev_pc[0]: the address of the instruction that just retired before
+ // the BP fired. The decoder uses this to discriminate JSR / BSR / BRA /
+ // fall-through, so it's the most-discriminating single field.
+ const uint8 head = s_prev_pc_head[cpu];
+ mix(s_prev_pc_ring[cpu][(head - 1) & (PREV_PC_RING_DEPTH - 1)]);
+
+ // Shadow call stack: depth + target chain. Two BPs reached through
+ // different call paths produce different signatures even when prev_pc[0]
+ // matches (e.g. fall-through into the same body label from two different
+ // upstream callers).
+ const unsigned depth = shadow_stack_depth[cpu];
+ mix((uint64)depth);
+ for (int i = (int)depth - 1; i >= 0; i--)
+  mix((uint64)shadow_stack[cpu][i].target);
+
+ return h;
+}
+
 // Format helper: renders
 //   "prev_pc=0xAA,0xBB,0xCC,0xDD isr_depth=N"
 // into out. Most-recent first: prev_pc[0] is the immediately-previous
@@ -1142,6 +1178,16 @@ size_t Automation_FormatPrevPCLine(unsigned cpu, char* out, size_t outsz)
 unsigned Automation_GetCurrentBusCPU(void)
 {
  return (automation_current_cpu < 2) ? automation_current_cpu : 0;
+}
+
+// Public accessor for BP_DEDUPE: hashes the current callstack signature for
+// CPU `cpu`. Out-of-range cpu values clamp to master (0). See
+// ComputeBPSignatureFor for what's mixed into the hash.
+uint64 Automation_ComputeBPSignature(unsigned cpu)
+{
+ if (cpu > 1)
+  cpu = 0;
+ return ComputeBPSignatureFor(cpu);
 }
 
 void Automation_SetWatchpoint(uint32 addr)

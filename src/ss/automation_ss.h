@@ -54,6 +54,12 @@ namespace MDFN_IEN_SS {
  // uses; intended for watchpoint hit emitters to pick the right prev-PC ring.
  unsigned Automation_GetCurrentBusCPU(void);
 
+ // Compute a 64-bit signature hash of the current control-flow context at CPU
+ // `cpu` (isr-active flag + prev_pc[0] + shadow-stack depth + target chain).
+ // Used by BP_DEDUPE to drop duplicate fires of the same logical entry-mode
+ // on a persistent BP. Out-of-range cpu clamps to master (0).
+ uint64 Automation_ComputeBPSignature(unsigned cpu);
+
  // Call tracing
  void Automation_EnableCallTrace(const char* path);
  void Automation_DisableCallTrace(void);

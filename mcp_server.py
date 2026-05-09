@@ -519,13 +519,28 @@ async def call_stack(scan_size: int = 1024) -> str:
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def breakpoint_set(address: str, log: bool = False, oneshot: bool = False) -> str:
+async def breakpoint_set(address: str,
+                         log: bool = False,
+                         oneshot: bool = False,
+                         dedupe: bool = False) -> str:
     """Set a PC breakpoint. Address in hex (e.g. '0x0600C5D6').
-    If log=True, logs full context (registers + call stack) to
+
+    log=True logs full context (registers + call stack) to
     breakpoint_hits.txt without pausing. Use for surveying all callers.
-    If oneshot=True, the BP auto-erases after its first hit. Once the BP
-    table empties, the per-instruction CPU hook self-disables — use this
-    for large coverage sweeps to avoid the 1FPS death spiral."""
+
+    oneshot=True auto-erases the BP after its first hit. Once the BP table
+    empties, the per-instruction CPU hook self-disables — use this for
+    large coverage sweeps to avoid the 1FPS death spiral. WARNING: oneshot
+    locks in the FIRST observed callstack and removes the BP, masking
+    later callers. Don't use for entry-point classification — use dedupe
+    instead.
+
+    dedupe=True is the persistent-with-uniqueness mode: BP stays installed
+    forever, but the hit log only records signatures (prev_pc + call_stack
+    + isr) that haven't been seen yet at this BP. For entry-classification
+    sweeps where a hallucinated body label might be reached by fall-through
+    first and a real JSR caller later — both fires get logged, no masking.
+    Mutually exclusive with oneshot in semantics."""
     if not _alive():
         return "FAIL: No session"
     addr = _strip_hex(address)
@@ -534,10 +549,14 @@ async def breakpoint_set(address: str, log: bool = False, oneshot: bool = False)
         cmd += " log"
     if oneshot:
         cmd += " once"
+    if dedupe:
+        cmd += " dedupe"
     ack = await _send_and_wait(cmd, "ok breakpoint", timeout=5)
     # Track only breakable (non-log) BPs. Log-mode BPs never produce a pause
     # event, so they don't gate run_free. Pause+oneshot is breakable for one
-    # hit — run_free reconciles via bp_total= in the break ack.
+    # hit — run_free reconciles via bp_total= in the break ack. Dedupe BPs
+    # in pause mode aren't really expected (the use case is log-mode sweeps),
+    # but if used, treat them as breakable from a counting perspective.
     if ack and not log:
         global _breakable_bp_count
         _breakable_bp_count += 1
@@ -586,7 +605,8 @@ async def breakpoint_list() -> str:
 async def breakpoint_set_from_file(path: str,
                                    result_path: str = "",
                                    clear_existing: bool = False,
-                                   oneshot: bool = False) -> str:
+                                   oneshot: bool = False,
+                                   dedupe: bool = False) -> str:
     """Bulk-install PC breakpoints (log mode) from a text file.
 
     File format: one hex address per line (optional 0x prefix). '#' starts a
@@ -600,9 +620,19 @@ async def breakpoint_set_from_file(path: str,
 
     oneshot=True installs each entry to log on first hit and then auto-erase.
     As entries drain, the per-instruction CPU debug hook self-disables once
-    the table empties, restoring full FPS. Strongly recommended for coverage
-    sweeps of 1000+ BPs — without it, the per-instruction lookup overhead can
-    push the emulator down to ~1 FPS for the entire session.
+    the table empties, restoring full FPS. Use for raw coverage sweeps where
+    only "was this address reached?" matters. WARNING: oneshot locks in the
+    FIRST observed callstack and removes the BP — for entry-point
+    classification (where the same address may be reached via fall-through
+    first then via a real JSR later) use dedupe instead.
+
+    dedupe=True installs each entry persistently and the hit log records each
+    unique (prev_pc + call_stack + isr) signature once per BP. Bitmap fast-
+    path keeps per-instruction overhead near-free regardless of how many BPs
+    are armed, so dedupe sweeps don't suffer the 1FPS oneshot was originally
+    motivated by — they can stay armed for the entire session. Use this for
+    FUN_X entry-classification sweeps. Mutually exclusive with oneshot in
+    semantics.
 
     Side effect: enabling log mode is a session-global flip. Any breakpoints
     previously installed in pause mode (plain `breakpoint_set(..., log=False)`)
@@ -627,6 +657,8 @@ async def breakpoint_set_from_file(path: str,
         cmd += " clear"
     if oneshot:
         cmd += " once"
+    if dedupe:
+        cmd += " dedupe"
     ack = await _send_and_wait(cmd,
                                ["ok breakpoint_set_from_file",
                                 "error breakpoint_set_from_file",

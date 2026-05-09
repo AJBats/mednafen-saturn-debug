@@ -242,14 +242,164 @@ static bool instruction_paused = false;     // true when spin-waiting inside deb
 // Per-breakpoint flag bits. Bitfield leaves room for future per-BP modes
 // (currently breakpoint_log_mode is still a session-global flip).
 static constexpr uint8_t BP_ONESHOT = 0x01;  // Auto-erase on first hit.
+static constexpr uint8_t BP_DEDUPE  = 0x02;  // Persistent BP that logs only
+                                             // unique (prev_pc + call_stack +
+                                             // isr) signatures. For
+                                             // entry-classification sweeps
+                                             // where oneshot would lock in
+                                             // the first observed callstack
+                                             // and miss later real callers.
+                                             // Mutually exclusive with
+                                             // BP_ONESHOT in semantics.
 
-// Breakpoint table. Map keyed by PC, value is a flag bitfield. Re-installing
-// the same address OR-merges flags. On a oneshot hit the entry is erased and
+// Per-BP state. Most entries are the trivial flag-only case; dedupe entries
+// also own an unordered_set of seen signature hashes (heap-allocated lazily
+// to avoid per-BP overhead in the bulk-oneshot case).
+struct BPEntry {
+ uint8_t flags;
+ std::unique_ptr<std::unordered_set<uint64_t>> seen;
+};
+
+// Breakpoint table. Map keyed by PC, value is BPEntry. Re-installing the
+// same address OR-merges flags. On a oneshot hit the entry is erased and
 // update_cpu_hook() is called — once the table empties, the per-instruction
-// debug hook self-disables, dropping back to native speed. This is what makes
-// large bulk installs (thousands of BPs) recover full performance after the
-// first sweep instead of paying O(set lookup) on every instruction forever.
-static std::unordered_map<uint32_t, uint8_t> breakpoints;
+// debug hook self-disables. Dedupe entries persist forever and rely on the
+// signature set to suppress duplicate log lines.
+static std::unordered_map<uint32_t, BPEntry> breakpoints;
+
+// Per-instruction BP fast-path bitmap (LWR + HWR). Replaces a per-instruction
+// unordered_map find() with a single bit-test (~1ns), eliminating the hash +
+// bucket walk overhead. Critical for large dedupe sweeps where the BP table
+// stays populated indefinitely. Mirrors the bulk read-WP bitmap design and
+// shares the same address-region semantics: 1MB per region, mirrors fold
+// (e.g. 0x06036CF8 / 0x07036CF8 share one bit).
+//
+// Addresses outside [LWR, HWR] (BIOS, cart, etc.) fall back to the
+// unordered_map slow path. bp_other_count tracks them so the hot path can
+// skip the slow lookup when none exist — uncommon for game code, where the
+// bulk of BPs land in HWR.
+static constexpr uint32_t BP_REGION_SIZE  = 0x100000;
+static constexpr uint32_t BP_REGION_MASK  = 0x000FFFFF;
+static constexpr uint32_t BP_BITMAP_BYTES = BP_REGION_SIZE / 8;  // 128KB per region
+static constexpr uint32_t BP_LWR_BASE     = 0x00200000;
+static constexpr uint32_t BP_LWR_END      = 0x003FFFFF;
+static constexpr uint32_t BP_HWR_BASE     = 0x06000000;
+static constexpr uint32_t BP_HWR_END      = 0x07FFFFFF;
+
+static uint8_t bp_bitmap_lwr[BP_BITMAP_BYTES];
+static uint8_t bp_bitmap_hwr[BP_BITMAP_BYTES];
+static size_t  bp_lwr_count = 0;
+static size_t  bp_hwr_count = 0;
+static size_t  bp_other_count = 0;
+
+static inline bool bp_bit_test(const uint8_t* bm, uint32_t off) {
+ return (bm[off >> 3] >> (off & 7)) & 1;
+}
+static inline void bp_bit_set(uint8_t* bm, uint32_t off) {
+ bm[off >> 3] |= (uint8_t)(1u << (off & 7));
+}
+static inline void bp_bit_clear(uint8_t* bm, uint32_t off) {
+ bm[off >> 3] &= (uint8_t)~(1u << (off & 7));
+}
+
+// Classify a BP address into (region, region-relative offset). Returns
+// BP_REGION_NONE for BIOS / cart / etc. — those go through the slow-path
+// unordered_map find(). Mirrors the bulk read-WP rwp_classify().
+enum BpRegion { BP_REGION_NONE = 0, BP_REGION_LWR = 1, BP_REGION_HWR = 2 };
+static BpRegion bp_classify(uint32_t addr, uint32_t* offset_out) {
+ uint32_t masked = addr & 0x0FFFFFFF;
+ if (masked >= BP_LWR_BASE && masked <= BP_LWR_END) {
+  *offset_out = masked & BP_REGION_MASK;
+  return BP_REGION_LWR;
+ }
+ if (masked >= BP_HWR_BASE && masked <= BP_HWR_END) {
+  *offset_out = masked & BP_REGION_MASK;
+  return BP_REGION_HWR;
+ }
+ return BP_REGION_NONE;
+}
+
+// Atomic install: update bitmap, region counter, and the BPEntry table
+// together. Re-installing the same address OR-merges flags; the bitmap bit
+// stays set (already correct). Allocating the seen-set is lazy, only when
+// BP_DEDUPE is first set on the entry. Returns true if a new entry was
+// inserted, false on flag merge.
+//
+// BP_DEDUPE wins over BP_ONESHOT — they're mutually exclusive in semantics
+// (dedupe means "persistent, log unique signatures"; oneshot means "remove
+// on first fire"). If a caller passes both, we strip BP_ONESHOT so the
+// dedupe contract is honored.
+static bool bp_install(uint32_t addr, uint8_t flags) {
+ if ((flags & BP_DEDUPE) && (flags & BP_ONESHOT))
+  flags &= (uint8_t)~BP_ONESHOT;
+
+ auto it = breakpoints.find(addr);
+ if (it != breakpoints.end()) {
+  const bool need_seen = (flags & BP_DEDUPE) && !it->second.seen;
+  // Same precedence at merge: if the merged result would have BP_DEDUPE,
+  // clear BP_ONESHOT from the final flags.
+  uint8_t merged = it->second.flags | flags;
+  if (merged & BP_DEDUPE) merged &= (uint8_t)~BP_ONESHOT;
+  it->second.flags = merged;
+  if (need_seen) it->second.seen.reset(new std::unordered_set<uint64_t>);
+  return false;
+ }
+ BPEntry e;
+ e.flags = flags;
+ if (flags & BP_DEDUPE) e.seen.reset(new std::unordered_set<uint64_t>);
+ breakpoints.emplace(addr, std::move(e));
+ //
+ uint32_t off;
+ BpRegion region = bp_classify(addr, &off);
+ if (region == BP_REGION_LWR)      { bp_bit_set(bp_bitmap_lwr, off); bp_lwr_count++; }
+ else if (region == BP_REGION_HWR) { bp_bit_set(bp_bitmap_hwr, off); bp_hwr_count++; }
+ else                              { bp_other_count++; }
+ return true;
+}
+
+// Atomic remove. Returns the number of entries erased (0 or 1).
+static size_t bp_remove(uint32_t addr) {
+ auto it = breakpoints.find(addr);
+ if (it == breakpoints.end()) return 0;
+ breakpoints.erase(it);
+ //
+ uint32_t off;
+ BpRegion region = bp_classify(addr, &off);
+ if (region == BP_REGION_LWR)      { bp_bit_clear(bp_bitmap_lwr, off); bp_lwr_count--; }
+ else if (region == BP_REGION_HWR) { bp_bit_clear(bp_bitmap_hwr, off); bp_hwr_count--; }
+ else                              { bp_other_count--; }
+ return 1;
+}
+
+// Atomic clear-all. Faster than iterating with bp_remove since it can memset
+// the bitmaps in one shot.
+static void bp_clear_all(void) {
+ breakpoints.clear();
+ memset(bp_bitmap_lwr, 0, sizeof(bp_bitmap_lwr));
+ memset(bp_bitmap_hwr, 0, sizeof(bp_bitmap_hwr));
+ bp_lwr_count = 0;
+ bp_hwr_count = 0;
+ bp_other_count = 0;
+}
+
+// Bitmap-only fast probe: returns true if there's a chance of a BP at pc or
+// pc-2 in any active region. Caller still consults the unordered_map for the
+// BPEntry on a probe-positive. False positives are impossible (bits are only
+// set when a BP is installed); false negatives are impossible (bits stay set
+// until the BP is removed). Inlined into the hot path.
+static inline bool bp_bitmap_probe(uint32_t pc) {
+ uint32_t pc_masked = pc & 0x0FFFFFFF;
+ if (bp_lwr_count && pc_masked >= BP_LWR_BASE && pc_masked <= BP_LWR_END) {
+  uint32_t off = pc_masked & BP_REGION_MASK;
+  if (bp_bit_test(bp_bitmap_lwr, off)) return true;
+  if (off >= 2 && bp_bit_test(bp_bitmap_lwr, off - 2)) return true;
+ } else if (bp_hwr_count && pc_masked >= BP_HWR_BASE && pc_masked <= BP_HWR_END) {
+  uint32_t off = pc_masked & BP_REGION_MASK;
+  if (bp_bit_test(bp_bitmap_hwr, off)) return true;
+  if (off >= 2 && bp_bit_test(bp_bitmap_hwr, off - 2)) return true;
+ }
+ return false;
+}
 
 // Track whether the CPU debug hook is currently enabled
 static bool cpu_hook_active = false;
@@ -864,10 +1014,14 @@ static void process_command(const std::string& line)
   write_ack("ok step " + std::to_string(n));
  }
  else if (cmd == "breakpoint") {
-  // breakpoint <addr> [log] [once]   (tokens any order, both optional)
-  //   log  = enable session-global log-only mode (no pause)
-  //   once = auto-erase this BP after its first hit (recovers perf for
-  //          large coverage sweeps; pairs naturally with `log`)
+  // breakpoint <addr> [log] [once] [dedupe]   (tokens any order, all optional)
+  //   log    = enable session-global log-only mode (no pause)
+  //   once   = auto-erase this BP after its first hit (recovers perf for
+  //            large coverage sweeps; pairs naturally with `log`)
+  //   dedupe = persistent BP that logs only unique callstack signatures.
+  //            For entry-classification: oneshot would mask later real
+  //            callers by clearing on first (possibly fall-through) hit.
+  //            Mutually exclusive with `once` in semantics.
   uint32_t addr = 0;
   iss >> std::hex >> addr;
   uint8_t flags = 0;
@@ -876,6 +1030,7 @@ static void process_command(const std::string& line)
   while (iss >> token) {
    if (token == "log") log_flag = true;
    else if (token == "once" || token == "oneshot") flags |= BP_ONESHOT;
+   else if (token == "dedupe" || token == "dedup")  flags |= BP_DEDUPE;
   }
   if (log_flag) {
    breakpoint_log_mode = true;
@@ -886,23 +1041,22 @@ static void process_command(const std::string& line)
      fprintf(bp_log, "# Breakpoint hit log (log mode)\n");
    }
   }
-  // OR-merge flags so re-installing the same address upgrades it (e.g. a
-  // plain `breakpoint X` followed by `breakpoint X once` becomes oneshot).
-  auto bp_it = breakpoints.find(addr);
-  if (bp_it != breakpoints.end()) bp_it->second |= flags;
-  else breakpoints.emplace(addr, flags);
+  // OR-merge flags via bp_install so the bitmap/counters stay consistent
+  // and seen-set is allocated on first BP_DEDUPE upgrade.
+  bp_install(addr, flags);
   update_cpu_hook();
   char buf[64];
   snprintf(buf, sizeof(buf), "0x%08X", addr);
   std::string ack_msg = "ok breakpoint " + std::string(buf) + " total=" + std::to_string(breakpoints.size());
   if (breakpoint_log_mode) ack_msg += " log";
   if (flags & BP_ONESHOT) ack_msg += " once";
+  if (flags & BP_DEDUPE)  ack_msg += " dedupe";
   write_ack(ack_msg);
  }
  else if (cmd == "breakpoint_remove") {
   uint32_t addr = 0;
   iss >> std::hex >> addr;
-  size_t removed = breakpoints.erase(addr);
+  size_t removed = bp_remove(addr);
   update_cpu_hook();
   char buf[64];
   if (removed) {
@@ -914,7 +1068,7 @@ static void process_command(const std::string& line)
  }
  else if (cmd == "breakpoint_clear") {
   size_t count = breakpoints.size();
-  breakpoints.clear();
+  bp_clear_all();
   breakpoint_log_mode = false;
   if (bp_log) { fclose(bp_log); bp_log = nullptr; }
   update_cpu_hook();
@@ -924,9 +1078,14 @@ static void process_command(const std::string& line)
   std::ostringstream ss;
   ss << "breakpoints count=" << breakpoints.size();
   for (auto& kv : breakpoints) {
-   char buf[24];
-   if (kv.second & BP_ONESHOT)
+   char buf[40];
+   const uint8_t f = kv.second.flags;
+   if ((f & BP_ONESHOT) && (f & BP_DEDUPE))
+    snprintf(buf, sizeof(buf), " 0x%08X[once,dedupe]", kv.first);
+   else if (f & BP_ONESHOT)
     snprintf(buf, sizeof(buf), " 0x%08X[once]", kv.first);
+   else if (f & BP_DEDUPE)
+    snprintf(buf, sizeof(buf), " 0x%08X[dedupe]", kv.first);
    else
     snprintf(buf, sizeof(buf), " 0x%08X", kv.first);
    ss << buf;
@@ -934,18 +1093,24 @@ static void process_command(const std::string& line)
   write_ack(ss.str());
  }
  else if (cmd == "breakpoint_set_from_file") {
-  // breakpoint_set_from_file <input_path> <result_path> [clear] [once]
+  // breakpoint_set_from_file <input_path> <result_path> [clear] [once] [dedupe]
   // Bulk installer for PC breakpoints in log mode (no pause). Input is a text file
   // with one hex address per line (optional 0x prefix). '#' starts a comment,
   // blank lines are ignored. Per-line parse failures are surfaced in the result
   // JSON; install proceeds for all valid addresses.
   //
   // Optional tokens (any order after result_path):
-  //   clear -- clear existing breakpoints + truncate hit log before install
-  //   once  -- install all entries with BP_ONESHOT: each fires log + erase on
-  //            its first hit. As entries drain, the per-instruction CPU hook
-  //            self-disables once the table empties (recovers full FPS for
-  //            large coverage sweeps).
+  //   clear  -- clear existing breakpoints + truncate hit log before install
+  //   once   -- install all entries with BP_ONESHOT: each fires log + erase on
+  //             its first hit. As entries drain, the per-instruction CPU hook
+  //             self-disables once the table empties (recovers full FPS for
+  //             large coverage sweeps).
+  //   dedupe -- install all entries with BP_DEDUPE: persistent BPs that log
+  //             only unique (prev_pc + call_stack + isr) signatures. For
+  //             entry-classification sweeps where `once` would lock in the
+  //             first observed callstack and miss later real callers reaching
+  //             a hallucinated body label via fall-through. Mutually
+  //             exclusive with `once` in semantics.
   //
   // Side effect: flips breakpoint_log_mode globally. Any previously-installed
   // pause-mode breakpoints become log-only for the rest of the session (matches
@@ -962,10 +1127,11 @@ static void process_command(const std::string& line)
   while (iss >> opt_tok) {
    if (opt_tok == "clear") clear_existing = true;
    else if (opt_tok == "once" || opt_tok == "oneshot") default_flags |= BP_ONESHOT;
+   else if (opt_tok == "dedupe" || opt_tok == "dedup") default_flags |= BP_DEDUPE;
   }
 
   if (input_path.empty() || result_path.empty()) {
-   write_ack("error breakpoint_set_from_file: usage <input_path> <result_path> [clear] [once]");
+   write_ack("error breakpoint_set_from_file: usage <input_path> <result_path> [clear] [once] [dedupe]");
   } else {
    std::ifstream in(input_path.c_str());
    if (!in.is_open()) {
@@ -1001,8 +1167,11 @@ static void process_command(const std::string& line)
     in.close();
 
     // Simulate the install so the result JSON reflects the final state.
+    // Mirror only the keyset (uint8_t flags) — the dedupe seen-set isn't
+    // relevant for the simulation, just the count of unique entries.
     std::unordered_map<uint32_t, uint8_t> sim;
-    if (!clear_existing) sim = breakpoints;
+    if (!clear_existing)
+     for (auto& kv : breakpoints) sim[kv.first] = kv.second.flags;
     int installed = 0, duplicates = 0;
     for (uint32_t a : valid_addrs) {
      auto ins = sim.emplace(a, default_flags);
@@ -1028,6 +1197,7 @@ static void process_command(const std::string& line)
      // `once`, pre-existing oneshot entries (if any) keep their flag — but
      // this field will still read false.
      fprintf(out, "  \"oneshot\": %s,\n", (default_flags & BP_ONESHOT) ? "true" : "false");
+     fprintf(out, "  \"dedupe\": %s,\n", (default_flags & BP_DEDUPE) ? "true" : "false");
      fputs("  \"failures\": [", out);
      for (size_t i = 0; i < failures.size(); ++i) {
       // JSON-escape per RFC 8259: \\, \", and control chars < 0x20 → \uXXXX.
@@ -1053,7 +1223,7 @@ static void process_command(const std::string& line)
 
      // ---- Pass 3: mutate live state, now that persistence has succeeded. ----
      if (clear_existing) {
-      breakpoints.clear();
+      bp_clear_all();
       if (bp_log) { fclose(bp_log); bp_log = nullptr; }
      }
      breakpoint_log_mode = true;
@@ -1063,10 +1233,8 @@ static void process_command(const std::string& line)
       if (bp_log)
        fprintf(bp_log, "# Breakpoint hit log (log mode)\n");
      }
-     for (uint32_t a : valid_addrs) {
-      auto ins = breakpoints.emplace(a, default_flags);
-      if (!ins.second) ins.first->second |= default_flags;
-     }
+     for (uint32_t a : valid_addrs)
+      bp_install(a, default_flags);
      update_cpu_hook();
 
      std::ostringstream ack;
@@ -1076,6 +1244,7 @@ static void process_command(const std::string& line)
          << " failed=" << failures.size()
          << " total=" << breakpoints.size();
      if (default_flags & BP_ONESHOT) ack << " once";
+     if (default_flags & BP_DEDUPE)  ack << " dedupe";
      ack << " result=" << result_path;
      write_ack(ack.str());
     }
@@ -2799,29 +2968,53 @@ bool Automation_DebugHook(uint32_t pc)
    perform_pokes_from_trigger(it->second, poke_tpc);
  }
 
- // Check breakpoints (O(1) lookup via unordered_map)
- // Also check pc-2: after JSR/BSR/JMP/RTS, the SH-2 pipeline fetch stage
- // advances PC past the first instruction at the branch target.
- // UCDelayBranch does FetchIF_ForceIBufferFill() which sets PC = target+2.
- // So when this hook fires, PC is already target+2 and a breakpoint set at
- // the exact branch target ('target') would miss without this fallback.
+ // Check breakpoints. Fast path: bitmap probe (single bit-test) skips the
+ // unordered_map lookup entirely when no BP exists at pc / pc-2. Slow path
+ // (unordered_map find) only runs on a probe-positive, or when there are
+ // BPs outside the LWR/HWR bitmap regions (bp_other_count > 0).
+ //
+ // pc-2 fallback: after JSR/BSR/JMP/RTS the SH-2 pipeline advances PC past
+ // the branch target's first instruction (UCDelayBranch + the implicit
+ // PC += 2 at op end leaves PC = target+2). A BP set at the target would
+ // miss without this fallback.
  bool bp_hit = false;
  uint32_t bp_addr = pc;
- auto bp_it = breakpoints.find(pc);
- if (bp_it == breakpoints.end()) {
-  bp_it = breakpoints.find(pc - 2);
+ auto bp_it = breakpoints.end();
+ if (bp_bitmap_probe(pc) || bp_other_count > 0) {
+  bp_it = breakpoints.find(pc);
   if (bp_it != breakpoints.end()) {
    bp_hit = true;
-   bp_addr = pc - 2;
+  } else {
+   bp_it = breakpoints.find(pc - 2);
+   if (bp_it != breakpoints.end()) {
+    bp_hit = true;
+    bp_addr = pc - 2;
+   }
   }
- } else {
-  bp_hit = true;
  }
- if (bp_hit && (bp_it->second & BP_ONESHOT)) {
+
+ // BP_DEDUPE: hash the current callstack signature and skip this fire if
+ // we've already logged the same signature at this BP. Bypass it by
+ // pretending the BP never hit (bp_hit = false). This is the entry-class
+ // sweep path: BPs persist forever and we silently drop repeats.
+ if (bp_hit && (bp_it->second.flags & BP_DEDUPE) && bp_it->second.seen) {
+  uint64_t sig = MDFN_IEN_SS::Automation_ComputeBPSignature(0);
+  auto ins = bp_it->second.seen->insert(sig);
+  if (!ins.second) {
+   // Duplicate signature — already logged this entry-mode for this BP.
+   // Silent skip: no log, no pause, leave BP installed for future
+   // distinct signatures.
+   bp_hit = false;
+   bp_it = breakpoints.end();
+  }
+ }
+
+ if (bp_hit && (bp_it->second.flags & BP_ONESHOT)) {
   // Erase before any further processing — this lets the table shrink as
   // coverage saturates, eventually emptying it and self-disabling the
   // per-instruction hook for full FPS recovery on large sweeps.
-  breakpoints.erase(bp_it);
+  bp_remove(bp_addr);
+  bp_it = breakpoints.end();
   update_cpu_hook();
  }
 
