@@ -1859,7 +1859,23 @@ switch(Pipe_ID >> 24)
 	RESUME_VAR(uint32, opexec_new_PC);
 
 	PC -= 2;
-	Exception(EXCEPTION_TRAP, (uint8)instr, opexec_new_PC)
+
+	if(MDFN_UNLIKELY((uint8)instr == SS_HOSTLOG_TRAP))
+	{
+	 // Mod-only host logging trap: read printf-style args off the guest stack
+	 // and format them on the host. No real trap is taken — resume at the
+	 // instruction after the trapa (PC already adjusted), leaving guest
+	 // registers and memory untouched. The else-branch keeps Exception in the
+	 // instruction stream so the resume-table __COUNTER__ accounting is
+	 // unchanged; the shared Branch below performs the continue.
+	 SS_HostLog_Emit(R[15]);
+	 opexec_new_PC = PC;
+	}
+	else
+	{
+	 Exception(EXCEPTION_TRAP, (uint8)instr, opexec_new_PC)
+	}
+
 	Branch(false, opexec_new_PC);
  END_OP
 

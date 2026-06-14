@@ -787,6 +787,162 @@ static MDFN_COLD void CheatMemWrite(uint32 A, uint8 V)
  }
 }
 //
+// Host-side debug logging trap (mod-only feature).
+//
+// Guest code executes `TRAPA #SS_HOSTLOG_TRAP`; the SH-2 core intercepts that
+// specific immediate (see the TRAPA op in sh7095_ops.inc) and dispatches here
+// instead of taking a real trap. The intercept happens before any stack push,
+// so R[15] is exactly what the guest set up. Convention, established by the
+// guest in raw asm right before the trapa:
+//
+//   @(0, r15) = pointer to a NUL-terminated printf-style format string
+//   @(4, r15) = arg0
+//   @(8, r15) = arg1
+//   ...
+//
+// i.e. push args in reverse, then the format pointer, then trapa. All args are
+// 32-bit stack words; %s args are guest pointers to NUL-terminated strings.
+// Formatting happens here on the host, so the guest needs no libc. Floating
+// point (%f/%g) and '*' width/precision are intentionally not supported.
+//
+#define SS_HOSTLOG_TRAP 0xFF
+
+static FILE* SS_HostLog_FP = NULL;
+
+static MDFN_COLD uint32 SS_HostLog_PeekU32(uint32 A)
+{
+ return ((uint32)CheatMemRead(A + 0) << 24) | ((uint32)CheatMemRead(A + 1) << 16) |
+        ((uint32)CheatMemRead(A + 2) <<  8) | ((uint32)CheatMemRead(A + 3) <<  0);
+}
+
+#if defined(__GNUC__)
+ #pragma GCC diagnostic push
+ #pragma GCC diagnostic ignored "-Wformat-nonliteral"
+ #pragma GCC diagnostic ignored "-Wformat-security"
+#endif
+static MDFN_COLD void SS_HostLog_Emit(uint32 sp)
+{
+ if(!SS_HostLog_FP)
+ {
+  SS_HostLog_FP = fopen("saturn_log.txt", "ab");
+  if(!SS_HostLog_FP)
+   return;
+ }
+
+ const uint32 fmt = SS_HostLog_PeekU32(sp);
+ uint32 argp = sp + 4;		// First vararg slot, just above the format pointer.
+ std::string out;
+
+ for(uint32 i = 0; i < 4096; )
+ {
+  const char c = (char)CheatMemRead(fmt + i++);
+  if(!c)
+   break;
+
+  if(c != '%')
+  {
+   out.push_back(c);
+   continue;
+  }
+
+  // Rebuild a single normalized host conversion spec: %[flags][width][.prec]conv
+  char spec[40];
+  unsigned si = 0;
+  spec[si++] = '%';
+
+  for(char f; (f = (char)CheatMemRead(fmt + i)),
+              (f == '-' || f == '+' || f == ' ' || f == '#' || f == '0') && si < sizeof(spec) - 4; i++)
+   spec[si++] = f;
+
+  for(char w; (w = (char)CheatMemRead(fmt + i)), (w >= '0' && w <= '9') && si < sizeof(spec) - 4; i++)
+   spec[si++] = w;
+
+  if((char)CheatMemRead(fmt + i) == '.')
+  {
+   spec[si++] = '.'; i++;
+   for(char p; (p = (char)CheatMemRead(fmt + i)), (p >= '0' && p <= '9') && si < sizeof(spec) - 4; i++)
+    spec[si++] = p;
+  }
+
+  // Length modifiers are consumed and dropped; every guest arg is a 32-bit word.
+  for(char l; (l = (char)CheatMemRead(fmt + i)), l == 'l' || l == 'h' || l == 'z' || l == 't' || l == 'j'; i++)
+   ;
+
+  const char conv = (char)CheatMemRead(fmt + i++);
+  char tmp[600];
+
+  switch(conv)
+  {
+   case '%':
+	out.push_back('%');
+	break;
+
+   case 'd': case 'i':
+	spec[si++] = 'd'; spec[si] = 0;
+	snprintf(tmp, sizeof(tmp), spec, (int)(int32)SS_HostLog_PeekU32(argp));
+	argp += 4;
+	out += tmp;
+	break;
+
+   case 'u': case 'x': case 'X': case 'o':
+	spec[si++] = conv; spec[si] = 0;
+	snprintf(tmp, sizeof(tmp), spec, (unsigned)SS_HostLog_PeekU32(argp));
+	argp += 4;
+	out += tmp;
+	break;
+
+   case 'c':
+	spec[si++] = 'c'; spec[si] = 0;
+	snprintf(tmp, sizeof(tmp), spec, (int)(SS_HostLog_PeekU32(argp) & 0xFF));
+	argp += 4;
+	out += tmp;
+	break;
+
+   case 'p':
+	snprintf(tmp, sizeof(tmp), "0x%08X", (unsigned)SS_HostLog_PeekU32(argp));
+	argp += 4;
+	out += tmp;
+	break;
+
+   case 's':
+   {
+	spec[si++] = 's'; spec[si] = 0;
+	uint32 strp = SS_HostLog_PeekU32(argp);
+	argp += 4;
+	char sbuf[256];
+	unsigned k = 0;
+	for(; k < sizeof(sbuf) - 1; k++)
+	{
+	 const char sc = (char)CheatMemRead(strp + k);
+	 if(!sc)
+	  break;
+	 sbuf[k] = sc;
+	}
+	sbuf[k] = 0;
+	snprintf(tmp, sizeof(tmp), spec, sbuf);
+	out += tmp;
+	break;
+   }
+
+   default:
+	// Unknown conversion: emit it verbatim rather than silently dropping it.
+	out.push_back('%');
+	if(conv)
+	 out.push_back(conv);
+	break;
+  }
+ }
+
+ if(!out.empty())
+ {
+  fwrite(out.data(), 1, out.size(), SS_HostLog_FP);
+  fflush(SS_HostLog_FP);
+ }
+}
+#if defined(__GNUC__)
+ #pragma GCC diagnostic pop
+#endif
+//
 //
 //
 static void SetFastMemMap(uint32 Astart, uint32 Aend, uint16* ptr, uint32 length, bool is_writeable)
