@@ -183,21 +183,23 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
             os.remove(f)
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    # Prefer debug build (has crash dump handler + symbols), fall back to release
-    med_debug = os.path.join(script_dir, "mednafen_debug.exe")
-    med_primary = os.path.join(script_dir, "src", "mednafen.exe")
-    med_fallback = os.path.join(script_dir, "mednafen_gcc494.exe")
-    if os.path.exists(med_debug):
-        med_bin = med_debug
-    elif os.path.exists(med_primary):
-        med_bin = med_primary
-    else:
-        med_bin = med_fallback
+    # Binary policy lives in mednafen_bot: native ELF everywhere, except
+    # interactive-with-sound under WSL, which uses the Windows exe (WSLg's
+    # audio bridge wedges under sustained streams; Windows audio doesn't).
+    from mednafen_bot import _find_mednafen, _win_native_home
+    med_bin = _find_mednafen(interactive_sound=sound)
 
     # Project-local MEDNAFEN_HOME so multiple instances can run side-by-side.
     # Priority: --home-dir flag > MEDNAFEN_HOME env var > script_dir/home default
     med_home = _home_dir or os.environ.get("MEDNAFEN_HOME") or os.path.join(script_dir, "home")
     os.makedirs(med_home, exist_ok=True)
+
+    # Windows exe under WSL rejects \\wsl.localhost UNC homes — redirect to
+    # a Windows-native mirror of the requested home.
+    if med_bin.endswith(".exe") and sys.platform.startswith("linux"):
+        wh = _win_native_home(med_home)
+        if wh:
+            med_home = wh
 
     # Remove stale lockfile
     lockfile = os.path.join(med_home, "mednafen.lck")
@@ -210,6 +212,14 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
     crash_dir = os.path.join(script_dir, "..", "crash_dumps")
     os.makedirs(crash_dir, exist_ok=True)
     env["MEDNAFEN_CRASH_DUMP_DIR"] = os.path.abspath(crash_dir)
+    # Env vars only cross the WSL->Windows interop boundary if listed in
+    # WSLENV ("/p" = translate path) — required for the Windows-exe case.
+    if sys.platform.startswith("linux"):
+        wslenv = env.get("WSLENV", "")
+        for var in ("MEDNAFEN_HOME/p", "MEDNAFEN_CRASH_DUMP_DIR/p"):
+            if var not in wslenv:
+                wslenv = f"{wslenv}:{var}" if wslenv else var
+        env["WSLENV"] = wslenv
 
     stderr_f = tempfile.NamedTemporaryFile(mode="w", suffix="_med.txt", delete=False)
     _proc = subprocess.Popen(
