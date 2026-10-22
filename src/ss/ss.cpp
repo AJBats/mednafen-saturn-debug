@@ -996,25 +996,32 @@ void SS_SetPhysMemMap(uint32 Astart, uint32 Aend, uint16* ptr, uint32 length, bo
   SetFastMemMap(Astart + Abase, Aend + Abase, ptr, length, is_writeable);
 }
 
+// SH-2 cache lines hold 32-bit words in host byte order (see NE32ASU8_IDX_ADJ
+// in sh7095.inc), so a byte's index within the line depends on host endianness.
+static INLINE unsigned Automation_CacheByteIdx(uint32 addr)
+{
+#ifdef MSB_FIRST
+ return addr & 0x0F;
+#else
+ return (addr & 0x0F) ^ 3;
+#endif
+}
+
 // Automation: read a byte from Saturn address space as the master CPU sees it.
 // Checks the SH-2 cache first (matching the CPU's actual view), then falls back
 // to the backing store (WorkRAMH/WorkRAML/BIOSROM).
 uint8 Automation_ReadMem8(uint32 addr)
 {
- addr &= 0x0FFFFFFF; // Strip mirror bits
+ addr &= 0x0FFFFFFF; // Strip mirror bits; what remains is the cacheable view
 
- // Check master SH-2 cache for cacheable regions (0x00000000-0x07FFFFFF).
- // The SH-2 cache uses bits [28:26] as region, region 0 is cacheable.
- if ((addr >> 26) == 0 && (CPU[0].CCR & SH7095::CCR_CE))
+ if (CPU[0].CCR & SH7095::CCR_CE)
  {
   uint32 ATM = addr & (0x7FFFF << 10);
   auto* cent = &CPU[0].Cache[(addr >> 4) & 0x3F];
 
   for (int way = 0; way < 4; way++) {
-   if (cent->Tag[way] == ATM) {
-    // Cache hit — return the byte from cache data (big-endian)
-    return cent->Data[way][addr & 0x0F];
-   }
+   if (cent->Tag[way] == ATM)
+    return cent->Data[way][Automation_CacheByteIdx(addr)];
   }
   // Cache miss — fall through to backing store
  }
@@ -1061,6 +1068,20 @@ uint8 Automation_ReadMem8(uint32 addr)
  return 0xFF; // Unmapped region
 }
 
+// Write-through to every SH-2 cache holding addr, as a CPU store would,
+// so both CPUs see a debugger write on their next cached read.
+static void Automation_UpdateCachedByte(uint32 addr, uint8 val)
+{
+ const uint32 ATM = addr & (0x7FFFF << 10);
+ for (unsigned c = 0; c < 2; c++) {
+  auto* cent = &CPU[c].Cache[(addr >> 4) & 0x3F];
+  for (int way = 0; way < 4; way++) {
+   if (cent->Tag[way] == ATM)
+    cent->Data[way][Automation_CacheByteIdx(addr)] = val;
+  }
+ }
+}
+
 void Automation_WriteMem8(uint32 addr, uint8 val)
 {
  addr &= 0x0FFFFFFF; // Strip mirror bits
@@ -1073,15 +1094,7 @@ void Automation_WriteMem8(uint32 addr, uint8 val)
    w = (w & 0xFF00) | val;
   else
    w = (w & 0x00FF) | (val << 8);
-
-  // Invalidate cache line so CPU sees the write
-  uint32 ATM = addr & (0x7FFFF << 10);
-  auto* cent = &CPU[0].Cache[(addr >> 4) & 0x3F];
-  for (int way = 0; way < 4; way++) {
-   if (cent->Tag[way] == ATM) {
-    cent->Data[way][addr & 0x0F] = val;
-   }
-  }
+  Automation_UpdateCachedByte(addr, val);
  }
  else if (addr >= 0x00200000 && addr <= 0x002FFFFF) {
   // WorkRAML
@@ -1091,6 +1104,7 @@ void Automation_WriteMem8(uint32 addr, uint8 val)
    w = (w & 0xFF00) | val;
   else
    w = (w & 0x00FF) | (val << 8);
+  Automation_UpdateCachedByte(addr, val);
  }
  // Other regions not supported for writes
 }
