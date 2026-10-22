@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Mednafen MCP Server v2 — full debug bridge for Claude Code.
 
-Architecture: Claude Code --(stdio/MCP)--> this server --(file IPC)--> Mednafen (Windows)
+Architecture: Claude Code --(stdio/MCP)--> this server --(file IPC)--> Mednafen
 
 All tools follow the same pattern:
   1. Check _alive()
@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 import struct
 import json
+import atexit
 
 from mcp.server.fastmcp import FastMCP
 
@@ -110,9 +111,19 @@ def _send(cmd):
     os.rename(tmp, _action_file)
 
 
-async def _wait_ack(keyword, timeout=30):
+class EmulatorError(Exception):
+    """The emulator answered a command with an error ack."""
+
+
+async def _wait_ack(keyword, timeout=30, raise_on_error=False):
     """Poll ack file for a line containing keyword.
-    keyword can be a string or a list of strings (matches any)."""
+    keyword can be a string or a list of strings (matches any).
+    With raise_on_error, a new ack starting with "error " raises
+    EmulatorError unless the caller listed a matching "error ..." keyword.
+    Commands are serialized, so a fresh error ack is this command's reply;
+    its verb often differs from the command name (e.g. "error unified_trace"
+    for unified_trace_start), and loose keywords like "cdl_dump" would
+    otherwise match it as success."""
     global _last_ack
     keywords = [keyword] if isinstance(keyword, str) else keyword
     deadline = time.time() + timeout
@@ -126,6 +137,10 @@ async def _wait_ack(keyword, timeout=30):
             except (IOError, PermissionError):
                 await asyncio.sleep(0.05)
                 continue
+            if (raise_on_error and content != _last_ack and content.startswith("error ")
+                    and not any(k.startswith("error") and k in content for k in keywords)):
+                _last_ack = content
+                raise EmulatorError(content)
             if content != _last_ack and any(k in content for k in keywords):
                 _last_ack = content
                 return content
@@ -134,9 +149,11 @@ async def _wait_ack(keyword, timeout=30):
 
 
 async def _send_and_wait(cmd, keyword, timeout=30):
-    """Send command, wait for ack."""
+    """Send command, wait for ack. Raises EmulatorError on an error ack the
+    caller did not ask for, so failures surface immediately with the
+    emulator's message instead of as a timeout."""
     _send(cmd)
-    return await _wait_ack(keyword, timeout)
+    return await _wait_ack(keyword, timeout, raise_on_error=True)
 
 
 def _alive():
@@ -174,6 +191,12 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
 
     ipc = _ipc_dir or os.path.join(tempfile.gettempdir(), "mednafen_mcp_ipc")
     os.makedirs(ipc, exist_ok=True)
+    from mednafen_bot import _automation_pids
+    others = _automation_pids(ipc)
+    if others:
+        return (f"FAIL: Mednafen already running on IPC dir {os.path.abspath(ipc)} "
+                f"(PIDs {others}); commands would race between instances. "
+                f"Ask the user to close them, then boot again.")
     _ipc_dir = ipc
     _ack_file = os.path.join(ipc, "mednafen_ack.txt")
     _action_file = os.path.join(ipc, "mednafen_action.txt")
@@ -186,7 +209,7 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
     # Binary policy lives in mednafen_bot: native ELF everywhere, except
     # interactive-with-sound under WSL, which uses the Windows exe (WSLg's
     # audio bridge wedges under sustained streams; Windows audio doesn't).
-    from mednafen_bot import _find_mednafen, _win_native_home
+    from mednafen_bot import _find_mednafen, _win_native_home, _die_with_parent
     med_bin = _find_mednafen(interactive_sound=sound)
 
     # Project-local MEDNAFEN_HOME so multiple instances can run side-by-side.
@@ -208,7 +231,7 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
 
     env = os.environ.copy()
     env["MEDNAFEN_HOME"] = med_home
-    # Point crash dumps to SaturnAutoRE/crash_dumps/
+    # Point crash dumps to crash_dumps/ beside this checkout
     crash_dir = os.path.join(script_dir, "..", "crash_dumps")
     os.makedirs(crash_dir, exist_ok=True)
     env["MEDNAFEN_CRASH_DUMP_DIR"] = os.path.abspath(crash_dir)
@@ -230,6 +253,7 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
         stdout=subprocess.DEVNULL,
         stderr=stderr_f,
         env=env,
+        preexec_fn=_die_with_parent,
     )
 
     _last_ack = ""
@@ -386,7 +410,7 @@ async def input_tap(button: str, hold_frames: int = 5) -> str:
 
 @mcp.tool()
 async def read_memory(address: str, length: int = 64) -> str:
-    """Read memory as hex dump text. Address in hex (e.g. '0x06078900'). Max 4096 bytes."""
+    """Read memory as hex dump text. Address in hex (e.g. '0x06010000'). Max 4096 bytes."""
     if not _alive():
         return "FAIL: No session"
     length = min(length, 4096)
@@ -533,7 +557,7 @@ async def breakpoint_set(address: str,
                          log: bool = False,
                          oneshot: bool = False,
                          dedupe: bool = False) -> str:
-    """Set a PC breakpoint. Address in hex (e.g. '0x0600C5D6').
+    """Set a PC breakpoint. Address in hex (e.g. '0x06004000').
 
     log=True logs full context (registers + call stack) to
     breakpoint_hits.txt without pausing. Use for surveying all callers.
@@ -778,7 +802,7 @@ async def poke_breakpoint_set(trigger_pc: str, pokes: list[dict]) -> str:
     list of memory values atomically and continue without pausing.
 
     pokes is a list of dicts: {addr: hex, value: int|hex, width: 8|16|32}.
-    Example: pokes=[{"addr": "0x0605224C", "value": 0x008CF8D0, "width": 32}]
+    Example: pokes=[{"addr": "0x06020000", "value": 0x00001234, "width": 32}]
 
     Replaces any existing trigger at trigger_pc (static or playback)."""
     if not _alive():
@@ -850,10 +874,10 @@ async def poke_playback_start(trigger_pc: str, base_addr: str, csv_path: str,
     in a transplant build so downstream rendering sees retail-like values.
 
     Args:
-      trigger_pc: hex PC, e.g. "0x06028002". Pokes fire right before this
+      trigger_pc: hex PC, e.g. "0x06004000". Pokes fire right before this
                   instruction executes.
       base_addr:  hex base address the column offsets are relative to
-                  (e.g. "0x0605224C" for car[0]).
+                  (e.g. "0x06020000").
       csv_path:   absolute path to the CSV. Format is the one produced by
                   sample_memory + tools/blob_to_csv.py: header row with
                   "+0xNN" offset names, data rows with 0xHHHHHHHH cells.
@@ -960,7 +984,7 @@ async def step(count: int = 1) -> str:
 @mcp.tool()
 async def watchpoint_set(address: str, value: str = "", log: bool = False) -> str:
     """Watch for 4-byte writes to address. Pauses on hit with full context.
-    Optional: value="0x06037F20" only fires when the new value equals that.
+    Optional: value="0x06010000" only fires when the new value equals that.
     Optional: log=True logs full context (registers + call stack) to
     watchpoint_hits.txt without pausing. Use for surveying all writers."""
     if not _alive():
@@ -1453,9 +1477,12 @@ async def insn_trace_stop() -> str:
 
 @mcp.tool()
 async def save_state(path: str) -> str:
-    """Save emulator state to file (gzip, GUI-compatible). Path = Windows path."""
+    """Save emulator state to file (gzip, GUI-compatible). Relative paths
+    resolve against the project root; missing parent directories are created."""
     if not _alive():
         return "FAIL: No session"
+    path = os.path.abspath(path)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
     ack = await _send_and_wait(f"save_state {wsl_path(path)}", "ok save_state", timeout=10)
     if not ack:
         return "FAIL: save_state timed out"
@@ -1470,6 +1497,7 @@ async def load_state(path: str) -> str:
     global _frame
     if not _alive():
         return "FAIL: No session"
+    path = os.path.abspath(path)
     if not os.path.exists(path):
         return f"FAIL: File not found: {path}"
     ack = await _send_and_wait(f"load_state {wsl_path(path)}", "ok load_state", timeout=15)
@@ -1493,6 +1521,8 @@ async def dump_region(region: str, path: str) -> str:
     if not _alive():
         return "FAIL: No session"
     ack = await _send_and_wait(f"dump_region {region} {wsl_path(path)}", "dump_region", timeout=15)
+    if ack and ack.startswith("error"):
+        return f"FAIL: {ack}"
     if ack and os.path.exists(path):
         size = os.path.getsize(path)
         return f"OK: {region} dumped to {path} ({size} bytes)"
@@ -1628,7 +1658,7 @@ async def mem_profile_stop() -> str:
 async def mem_read_profile_start(address_lo: str, address_hi: str) -> str:
     """Start logging all CPU reads in an address range. Addresses in hex.
     Logs pc, pr (caller), addr, and size for each read. Use to find all
-    functions that read from a memory region (e.g. disc-loaded track data)."""
+    functions that read from a memory region (e.g. disc-loaded asset data)."""
     if not _alive():
         return "FAIL: No session"
     lo = _strip_hex(address_lo)
@@ -1937,7 +1967,7 @@ async def memory_filter_candidates(candidates: str, mode: str = "changed", width
     """Narrow down candidate addresses by reading current values and comparing.
 
     Args:
-        candidates: Comma-separated hex addresses (e.g. '0x06078900,0x0607890C').
+        candidates: Comma-separated hex addresses (e.g. '0x06010000,0x06010004').
         mode: 'changed', 'increased', 'decreased', 'unchanged'.
         width: Bit width (8, 16, or 32).
     """
@@ -2011,7 +2041,7 @@ async def capture_trace(
       dma=True              Also log SCU DMA transfers (separate file).
 
       mem_profile_lo/hi     Also log CPU writes in an address range
-                            (hex, e.g. "0x06028000"/"0x060FFFFF").
+                            (hex, e.g. "0x06004000"/"0x060FFFFF").
                             Both must be set. Separate file.
 
       insn_after_event +    Dump EVERY SH-2 instruction (with full
@@ -2155,7 +2185,7 @@ async def capture_trace(
 @mcp.tool()
 async def raw_command(command: str) -> str:
     """Send a raw automation command to Mednafen. Returns the ack response.
-    Example: raw_command('dump_mem 06078900 100')
+    Example: raw_command('dump_mem 06010000 100')
     """
     if not _alive():
         return "FAIL: No session"
@@ -2212,6 +2242,16 @@ async def sample_memory_stop() -> str:
 # Entry point
 # ---------------------------------------------------------------------------
 
+def _shutdown_emulator():
+    """Close our Mednafen when the server exits so it is never orphaned."""
+    if _alive():
+        _proc.terminate()
+        try:
+            _proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _proc.kill()
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -2228,6 +2268,7 @@ def main():
     if args.home_dir:
         _home_dir = args.home_dir
 
+    atexit.register(_shutdown_emulator)
     mcp.run()
 
 

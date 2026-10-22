@@ -92,6 +92,40 @@ def _find_mednafen(interactive_sound=False):
     return primary  # let it fail at launch time with a clear path
 
 
+def _die_with_parent():
+    """Popen preexec_fn: have Linux send SIGTERM to the emulator when the
+    process that launched it exits, even if that process is killed."""
+    if sys.platform.startswith("linux"):
+        import ctypes, signal
+        PR_SET_PDEATHSIG = 1
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+
+
+def _automation_pids(ipc_dir, exclude=()):
+    """PIDs of running Mednafen instances whose --automation dir is ipc_dir.
+    Two emulators sharing an IPC dir race for every command, so callers
+    refuse to launch while any exist."""
+    target = os.path.realpath(ipc_dir)
+    pids = []
+    if not os.path.isdir("/proc"):
+        return pids
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit() or int(entry) in exclude:
+            continue
+        try:
+            with open(f"/proc/{entry}/cmdline", "rb") as f:
+                args = f.read().decode(errors="replace").split("\0")
+            if "--automation" not in args:
+                continue
+            ipc_arg = args[args.index("--automation") + 1]
+            cwd = os.readlink(f"/proc/{entry}/cwd")
+        except (OSError, IndexError):
+            continue
+        if os.path.realpath(os.path.join(cwd, ipc_arg)) == target:
+            pids.append(int(entry))
+    return pids
+
+
 def _win_path(p):
     """Normalize path for Windows Mednafen (forward slashes)."""
     return p.replace("\\", "/")
@@ -114,11 +148,16 @@ class MednafenBot:
         self.sound = sound
         self.home_dir = home_dir or _DEFAULT_HOME
         self.verbose = verbose
+        self.last_error = None
 
     def start(self, timeout=45):
         """Launch Mednafen and wait for ready ack."""
         med_bin = _find_mednafen(interactive_sound=self.sound)
         os.makedirs(self.ipc_dir, exist_ok=True)
+        others = _automation_pids(self.ipc_dir)
+        if others:
+            print(f"  [!] Mednafen already running on {self.ipc_dir}: PIDs {others}")
+            return False
         os.makedirs(self.home_dir, exist_ok=True)
 
         # Windows exe under WSL cannot use a \\wsl.localhost UNC home —
@@ -149,7 +188,7 @@ class MednafenBot:
 
         env = os.environ.copy()
         env["MEDNAFEN_HOME"] = home_dir
-        # Point crash dumps to the SaturnAutoRE crash_dumps dir
+        # Point crash dumps to crash_dumps/ beside this checkout
         crash_dir = os.path.join(MEDNAFEN_DIR, "..", "crash_dumps")
         os.makedirs(crash_dir, exist_ok=True)
         env["MEDNAFEN_CRASH_DUMP_DIR"] = os.path.abspath(crash_dir)
@@ -175,6 +214,7 @@ class MednafenBot:
             stdout=subprocess.DEVNULL,
             stderr=self.stderr_file,
             env=env,
+            preexec_fn=_die_with_parent,
         )
 
         deadline = time.time() + timeout
@@ -218,6 +258,10 @@ class MednafenBot:
         """Wait for ack to change and contain keyword.
 
         keyword can be a string or list of strings (matches any).
+        A new ack starting with "error " is this command's failure reply
+        unless the caller listed a matching "error ..." keyword: it is stored
+        in last_error and None is returned immediately rather than after the
+        timeout (or matched as success by a loose keyword).
         """
         keywords = [keyword] if isinstance(keyword, str) else keyword
         deadline = time.time() + timeout
@@ -232,6 +276,13 @@ class MednafenBot:
                 except (IOError, PermissionError):
                     time.sleep(0.05)
                     continue
+                if content != self.last_ack and content.startswith("error ") \
+                        and not any(k.startswith("error") and k in content
+                                    for k in keywords):
+                    self.last_ack = content
+                    self.last_error = content
+                    print(f"  [!] {content}")
+                    return None
                 if content != self.last_ack and any(k in content for k in keywords):
                     self.last_ack = content
                     if self.verbose:
