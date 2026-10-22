@@ -25,6 +25,9 @@ import atexit
 
 from mcp.server.fastmcp import FastMCP
 
+from mednafen_bot import (_find_mednafen, _win_native_home, _die_with_parent,
+                          _automation_pids, _is_error_reply)
+
 mcp = FastMCP("mednafen")
 
 
@@ -57,6 +60,7 @@ _frame = 0
 _ipc_dir = None
 _default_cue = None
 _home_dir = None
+_med_bin = None
 
 # Cheat-engine memory snapshots (name -> bytes)
 _memory_snapshots = {}
@@ -118,12 +122,8 @@ class EmulatorError(Exception):
 async def _wait_ack(keyword, timeout=30, raise_on_error=False):
     """Poll ack file for a line containing keyword.
     keyword can be a string or a list of strings (matches any).
-    With raise_on_error, a new ack starting with "error " raises
-    EmulatorError unless the caller listed a matching "error ..." keyword.
-    Commands are serialized, so a fresh error ack is this command's reply;
-    its verb often differs from the command name (e.g. "error unified_trace"
-    for unified_trace_start), and loose keywords like "cdl_dump" would
-    otherwise match it as success."""
+    With raise_on_error, an error reply (see _is_error_reply) raises
+    EmulatorError."""
     global _last_ack
     keywords = [keyword] if isinstance(keyword, str) else keyword
     deadline = time.time() + timeout
@@ -137,8 +137,7 @@ async def _wait_ack(keyword, timeout=30, raise_on_error=False):
             except (IOError, PermissionError):
                 await asyncio.sleep(0.05)
                 continue
-            if (raise_on_error and content != _last_ack and content.startswith("error ")
-                    and not any(k.startswith("error") and k in content for k in keywords)):
+            if raise_on_error and content != _last_ack and _is_error_reply(content, keywords):
                 _last_ack = content
                 raise EmulatorError(content)
             if content != _last_ack and any(k in content for k in keywords):
@@ -173,7 +172,7 @@ def _ipc_path(name):
 async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> str:
     """Launch Mednafen with a disc image. Starts paused at frame 0.
     Set sound=True for interactive play (enables audio and frame pacing)."""
-    global _proc, _ack_file, _action_file, _last_ack, _seq, _frame, _ipc_dir
+    global _proc, _ack_file, _action_file, _last_ack, _seq, _frame, _ipc_dir, _med_bin
 
     if _alive():
         _send("quit")
@@ -181,6 +180,7 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
             _proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             _proc.kill()
+            _proc.wait()
 
     global _breakable_bp_count
     _break_sources.clear()
@@ -191,7 +191,6 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
 
     ipc = _ipc_dir or os.path.join(tempfile.gettempdir(), "mednafen_mcp_ipc")
     os.makedirs(ipc, exist_ok=True)
-    from mednafen_bot import _automation_pids
     others = _automation_pids(ipc)
     if others:
         return (f"FAIL: Mednafen already running on IPC dir {os.path.abspath(ipc)} "
@@ -209,8 +208,8 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
     # Binary policy lives in mednafen_bot: native ELF everywhere, except
     # interactive-with-sound under WSL, which uses the Windows exe (WSLg's
     # audio bridge wedges under sustained streams; Windows audio doesn't).
-    from mednafen_bot import _find_mednafen, _win_native_home, _die_with_parent
     med_bin = _find_mednafen(interactive_sound=sound)
+    _med_bin = med_bin
 
     # Project-local MEDNAFEN_HOME so multiple instances can run side-by-side.
     # Priority: --home-dir flag > MEDNAFEN_HOME env var > script_dir/home default
@@ -253,7 +252,7 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
         stdout=subprocess.DEVNULL,
         stderr=stderr_f,
         env=env,
-        preexec_fn=_die_with_parent,
+        preexec_fn=_die_with_parent(),
     )
 
     _last_ack = ""
@@ -327,8 +326,6 @@ async def screenshot(output_path: str = "", scale: int = 3) -> str:
     ack = await _send_and_wait(f"screenshot {wsl_path(shot)}", "ok screenshot", timeout=10)
     if not ack:
         return "FAIL: screenshot timed out"
-    if "error" in ack:
-        return f"FAIL: {ack}"
     if scale > 1 and os.path.exists(shot):
         try:
             from PIL import Image
@@ -351,6 +348,7 @@ async def quit_emulator() -> str:
             _proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             _proc.kill()
+            _proc.wait()
     _proc = None
     _break_sources.clear()
     _breakable_bp_count = 0
@@ -1475,19 +1473,27 @@ async def insn_trace_stop() -> str:
 # Save / Load state
 # ---------------------------------------------------------------------------
 
+def _state_path(path):
+    """Absolute path for the native build. The Windows exe (sound sessions
+    under WSL) cannot open Linux absolute paths but shares the server's
+    working directory, so its paths pass through unchanged."""
+    if _med_bin and _med_bin.endswith(".exe"):
+        return path
+    return os.path.abspath(path)
+
+
 @mcp.tool()
 async def save_state(path: str) -> str:
     """Save emulator state to file (gzip, GUI-compatible). Relative paths
-    resolve against the project root; missing parent directories are created."""
+    resolve against the server's working directory (the project root when
+    launched from .mcp.json); missing parent directories are created."""
     if not _alive():
         return "FAIL: No session"
-    path = os.path.abspath(path)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    path = _state_path(path)
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
     ack = await _send_and_wait(f"save_state {wsl_path(path)}", "ok save_state", timeout=10)
     if not ack:
         return "FAIL: save_state timed out"
-    if "error" in ack:
-        return f"FAIL: {ack}"
     return f"OK: State saved to {path}"
 
 
@@ -1497,14 +1503,12 @@ async def load_state(path: str) -> str:
     global _frame
     if not _alive():
         return "FAIL: No session"
-    path = os.path.abspath(path)
+    path = _state_path(path)
     if not os.path.exists(path):
         return f"FAIL: File not found: {path}"
     ack = await _send_and_wait(f"load_state {wsl_path(path)}", "ok load_state", timeout=15)
     if not ack:
         return "FAIL: load_state timed out"
-    if "error" in ack:
-        return f"FAIL: {ack}"
     _frame = 0  # Reset — all frame references are relative to save state load
     return f"OK: State loaded from {path}"
 
@@ -1521,8 +1525,6 @@ async def dump_region(region: str, path: str) -> str:
     if not _alive():
         return "FAIL: No session"
     ack = await _send_and_wait(f"dump_region {region} {wsl_path(path)}", "dump_region", timeout=15)
-    if ack and ack.startswith("error"):
-        return f"FAIL: {ack}"
     if ack and os.path.exists(path):
         size = os.path.getsize(path)
         return f"OK: {region} dumped to {path} ({size} bytes)"
@@ -2079,70 +2081,76 @@ async def capture_trace(
     do_mem = bool(mem_profile_lo and mem_profile_hi)
     do_insn = bool(insn_after_event and insn_until_event)
 
-    # --- Start unified trace (always) ---
-    ack = await _send_and_wait(
-        f"unified_trace {wsl_path(out_abs)}", "ok unified_trace", timeout=10)
-    if not ack:
-        await quit_emulator()
-        return "FAIL: unified_trace command timed out"
-
-    # --- Start optional layers ---
-    if dma:
-        if os.path.exists(dma_path):
-            os.remove(dma_path)
-        await _send_and_wait(
-            f"dma_trace {wsl_path(dma_path)}", "ok dma_trace", timeout=5)
-
-    if do_mem:
-        if os.path.exists(mem_path):
-            os.remove(mem_path)
-        lo = _strip_hex(mem_profile_lo)
-        hi = _strip_hex(mem_profile_hi)
-        await _send_and_wait(
-            f"mem_profile {lo} {hi} {wsl_path(mem_path)}", "ok mem_profile", timeout=5)
-
-    if do_insn:
-        # Unified trace has a 2-line header; first real event is line 3.
-        effective_start = max(insn_after_event, 3)
-        await _send_and_wait(
-            f"insn_trace_unified {effective_start} {insn_until_event}",
-            "ok insn_trace_unified", timeout=5)
-
-    # --- Advance with BIOS skip ---
-    current_frame = 0
-    if skip_bios:
-        for target_frame, cmd in _BIOS_SKIP:
-            if target_frame >= frames:
-                break
-            delta = target_frame - current_frame
-            if delta > 0:
-                fa_ack = await _send_and_wait(
-                    f"frame_advance {delta}",
-                    ["done frame_advance", "hit watchpoint"], timeout=180)
-                if not fa_ack or not _alive():
-                    await quit_emulator()
-                    return f"FAIL: Died during frame advance (reached frame {current_frame} of {frames})"
-                current_frame = target_frame
-            await _send_and_wait(cmd, "ok", timeout=5)
-
-    remaining = frames - current_frame
-    if remaining > 0:
-        fa_ack = await _send_and_wait(
-            f"frame_advance {remaining}",
-            ["done frame_advance", "hit watchpoint"], timeout=600)
-        if not fa_ack or not _alive():
+    # An error ack raises EmulatorError; tear the session down rather than
+    # leave traces running and the emulator alive.
+    try:
+        # --- Start unified trace (always) ---
+        ack = await _send_and_wait(
+            f"unified_trace {wsl_path(out_abs)}", "ok unified_trace", timeout=10)
+        if not ack:
             await quit_emulator()
-            return f"FAIL: Died during frame advance (reached frame {current_frame} of {frames})"
+            return "FAIL: unified_trace command timed out"
 
-    # --- Stop everything and quit ---
-    if do_insn:
-        await _send_and_wait("insn_trace_stop", "insn_trace_stop", timeout=5)
-    if do_mem:
-        await _send_and_wait("mem_profile_stop", "ok mem_profile_stop", timeout=5)
-    if dma:
-        await _send_and_wait("dma_trace_stop", "ok dma_trace_stop", timeout=5)
-    await _send_and_wait("unified_trace_stop", "ok unified_trace_stop", timeout=10)
-    await quit_emulator()
+        # --- Start optional layers ---
+        if dma:
+            if os.path.exists(dma_path):
+                os.remove(dma_path)
+            await _send_and_wait(
+                f"dma_trace {wsl_path(dma_path)}", "ok dma_trace", timeout=5)
+
+        if do_mem:
+            if os.path.exists(mem_path):
+                os.remove(mem_path)
+            lo = _strip_hex(mem_profile_lo)
+            hi = _strip_hex(mem_profile_hi)
+            await _send_and_wait(
+                f"mem_profile {lo} {hi} {wsl_path(mem_path)}", "ok mem_profile", timeout=5)
+
+        if do_insn:
+            # Unified trace has a 2-line header; first real event is line 3.
+            effective_start = max(insn_after_event, 3)
+            await _send_and_wait(
+                f"insn_trace_unified {effective_start} {insn_until_event}",
+                "ok insn_trace_unified", timeout=5)
+
+        # --- Advance with BIOS skip ---
+        current_frame = 0
+        if skip_bios:
+            for target_frame, cmd in _BIOS_SKIP:
+                if target_frame >= frames:
+                    break
+                delta = target_frame - current_frame
+                if delta > 0:
+                    fa_ack = await _send_and_wait(
+                        f"frame_advance {delta}",
+                        ["done frame_advance", "hit watchpoint"], timeout=180)
+                    if not fa_ack or not _alive():
+                        await quit_emulator()
+                        return f"FAIL: Died during frame advance (reached frame {current_frame} of {frames})"
+                    current_frame = target_frame
+                await _send_and_wait(cmd, "ok", timeout=5)
+
+        remaining = frames - current_frame
+        if remaining > 0:
+            fa_ack = await _send_and_wait(
+                f"frame_advance {remaining}",
+                ["done frame_advance", "hit watchpoint"], timeout=600)
+            if not fa_ack or not _alive():
+                await quit_emulator()
+                return f"FAIL: Died during frame advance (reached frame {current_frame} of {frames})"
+
+        # --- Stop everything and quit ---
+        if do_insn:
+            await _send_and_wait("insn_trace_stop", "insn_trace_stop", timeout=5)
+        if do_mem:
+            await _send_and_wait("mem_profile_stop", "ok mem_profile_stop", timeout=5)
+        if dma:
+            await _send_and_wait("dma_trace_stop", "ok dma_trace_stop", timeout=5)
+        await _send_and_wait("unified_trace_stop", "ok unified_trace_stop", timeout=10)
+        await quit_emulator()
+    except EmulatorError as e:
+        await quit_emulator()
+        return f"FAIL: {e}"
 
     # --- Report ---
     def _file_stats(path):
@@ -2250,6 +2258,7 @@ def _shutdown_emulator():
             _proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             _proc.kill()
+            _proc.wait()
 
 
 def main():

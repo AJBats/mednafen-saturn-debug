@@ -1007,24 +1007,13 @@ static INLINE unsigned Automation_CacheByteIdx(uint32 addr)
 #endif
 }
 
-// Automation: read a byte from Saturn address space as the master CPU sees it.
-// Checks the SH-2 cache first (matching the CPU's actual view), then falls back
-// to the backing store (WorkRAMH/WorkRAML/BIOSROM).
+// Automation: read a byte from Saturn address space via the backing store
+// (WorkRAMH/WorkRAML/BIOSROM/VRAM), matching dump_region. The SH-2 caches are
+// write-through, so this equals what the CPUs read except for lines made
+// stale by DMA or the other CPU.
 uint8 Automation_ReadMem8(uint32 addr)
 {
- addr &= 0x0FFFFFFF; // Strip mirror bits; what remains is the cacheable view
-
- if (CPU[0].CCR & SH7095::CCR_CE)
- {
-  uint32 ATM = addr & (0x7FFFF << 10);
-  auto* cent = &CPU[0].Cache[(addr >> 4) & 0x3F];
-
-  for (int way = 0; way < 4; way++) {
-   if (cent->Tag[way] == ATM)
-    return cent->Data[way][Automation_CacheByteIdx(addr)];
-  }
-  // Cache miss — fall through to backing store
- }
+ addr &= 0x0FFFFFFF; // Strip mirror bits
 
  if (addr >= 0x06000000 && addr <= 0x060FFFFF) {
   // WorkRAMH — stored as big-endian uint16 array

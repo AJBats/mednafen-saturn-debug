@@ -93,12 +93,38 @@ def _find_mednafen(interactive_sound=False):
 
 
 def _die_with_parent():
-    """Popen preexec_fn: have Linux send SIGTERM to the emulator when the
-    process that launched it exits, even if that process is killed."""
-    if sys.platform.startswith("linux"):
-        import ctypes, signal
-        PR_SET_PDEATHSIG = 1
-        ctypes.CDLL("libc.so.6", use_errno=True).prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+    """Return a Popen preexec_fn that makes Linux send SIGTERM to the child
+    when the launching process exits, even if it is killed. prctl is
+    resolved here in the parent so the forked child only makes the one
+    libc call (importing or dlopen-ing after fork can deadlock when the
+    parent is multithreaded, as the MCP server is). None off Linux."""
+    if not sys.platform.startswith("linux"):
+        return None
+    try:
+        import ctypes
+        prctl = ctypes.CDLL(None, use_errno=True).prctl
+    except (OSError, AttributeError):
+        return None
+    import signal
+    sigterm = int(signal.SIGTERM)
+    parent = os.getpid()
+
+    def preexec():
+        prctl(1, sigterm)  # PR_SET_PDEATHSIG; failure only loses the safety net
+        # If the parent died before prctl ran, the signal will never come.
+        if os.getppid() != parent:
+            os._exit(1)
+    return preexec
+
+
+def _is_error_reply(content, keywords):
+    """True for an emulator error ack the caller did not ask to handle.
+    Commands are serialized, so a fresh "error ..." ack is the reply to the
+    command just sent. Its verb often differs from the command name (e.g.
+    "error unified_trace" for unified_trace_start), and loose keywords like
+    "cdl_dump" would otherwise match it as success."""
+    return content.startswith("error ") and not any(
+        k.startswith("error") and k in content for k in keywords)
 
 
 def _automation_pids(ipc_dir, exclude=()):
@@ -214,7 +240,7 @@ class MednafenBot:
             stdout=subprocess.DEVNULL,
             stderr=self.stderr_file,
             env=env,
-            preexec_fn=_die_with_parent,
+            preexec_fn=_die_with_parent(),
         )
 
         deadline = time.time() + timeout
@@ -234,10 +260,12 @@ class MednafenBot:
             time.sleep(0.2)
 
         self.proc.kill()
+        self.proc.wait()
         return False
 
     def send(self, cmd):
         """Send a command via action file (with retry for Windows file locks)."""
+        self.last_error = None
         self.seq += 1
         padding = "." * (self.seq % 16)
         tmp = self.action_file + ".tmp"
@@ -258,10 +286,8 @@ class MednafenBot:
         """Wait for ack to change and contain keyword.
 
         keyword can be a string or list of strings (matches any).
-        A new ack starting with "error " is this command's failure reply
-        unless the caller listed a matching "error ..." keyword: it is stored
-        in last_error and None is returned immediately rather than after the
-        timeout (or matched as success by a loose keyword).
+        An error reply (see _is_error_reply) is stored in last_error and
+        None is returned immediately rather than after the timeout.
         """
         keywords = [keyword] if isinstance(keyword, str) else keyword
         deadline = time.time() + timeout
@@ -276,9 +302,7 @@ class MednafenBot:
                 except (IOError, PermissionError):
                     time.sleep(0.05)
                     continue
-                if content != self.last_ack and content.startswith("error ") \
-                        and not any(k.startswith("error") and k in content
-                                    for k in keywords):
+                if content != self.last_ack and _is_error_reply(content, keywords):
                     self.last_ack = content
                     self.last_error = content
                     print(f"  [!] {content}")
@@ -332,6 +356,7 @@ class MednafenBot:
                 self.proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+                self.proc.wait()
         if self.stderr_file:
             self.stderr_file.close()
             try:
