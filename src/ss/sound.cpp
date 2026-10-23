@@ -159,6 +159,13 @@ void SOUND_PokeRAM(uint32 A, uint8 V)
  ne16_wbo_be<uint8>(SCSP.GetRAMPtr(), A & 0x7FFFF, V);
 }
 
+// Slot control registers (A & 0x3FF): what a CPU read returns, the last
+// value written with KYONEX and unused bits cleared.
+uint8 SOUND_PeekSlotReg(uint32 A)
+{
+ return SCSP.PeekSlotReg8(A);
+}
+
 uint64 SOUND_PeekMPROG(uint32 A)
 {
  return SCSP.PeekMPROG(A);

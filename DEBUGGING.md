@@ -139,7 +139,10 @@ Button bits (Mednafen IDII layout):
 disc may only exist in cache, not in backing RAM.
 
 **Readable memory regions**: BIOS ROM, Work RAM Low/High, VDP1 VRAM, VDP1 framebuffer,
-VDP2 VRAM, VDP2 CRAM, SCSP sound RAM. Unmapped addresses return 0xFF.
+VDP2 VRAM, VDP2 CRAM, SCSP sound RAM, SCSP slot control registers (0x25B00000-0x25B003FF,
+32 slots x 0x20 bytes: what a CPU read returns, i.e. the last value written by the SH-2s,
+the 68K or SCSP DMA, with KYONEX and unused bits cleared; slot offsets 0x18-0x1F read 0).
+Unmapped addresses return 0xFF.
 
 ### Debug: Instruction-Level
 

@@ -1045,6 +1045,10 @@ uint8 Automation_ReadMem8(uint32 addr)
   // SCSP sound RAM (512KB)
   return SOUND_PeekRAM(addr);
  }
+ else if (addr >= 0x05B00000 && addr <= 0x05B003FF) {
+  // SCSP slot control registers (32 slots x 0x20 bytes)
+  return SOUND_PeekSlotReg(addr);
+ }
  else if (addr >= 0x05E00000 && addr <= 0x05E7FFFF) {
   // VDP2 VRAM (512KB)
   return VDP2::PeekVRAM(addr - 0x05E00000);

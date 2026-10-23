@@ -59,6 +59,7 @@ class SS_SCSP
  INLINE void PokeMEMS(uint32 A, uint32 V)  { assert(A < 0x20); DSP.MEMS[A] = V & 0x00FFFFFF; }
  INLINE uint32 PeekTEMPRel(uint32 A)	  { assert(A < 0x80); return DSP.TEMP[(DSP.MDEC_CT + A) & 0x7F]; }
  INLINE void PokeTEMPRel(uint32 A, uint32 V)  { assert(A < 0x80); DSP.TEMP[(DSP.MDEC_CT + A) & 0x7F] = V & 0x00FFFFFF; }
+ INLINE uint8 PeekSlotReg8(uint32 A) { return ne16_rbo_be<uint8>(SlotRegs[(A >> 5) & 0x1F], A & 0x1F); }
 
  enum
  {

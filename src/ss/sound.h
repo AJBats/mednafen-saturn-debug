@@ -47,6 +47,7 @@ void SOUND_Write16(uint32 A, uint16 V);
 
 uint8 SOUND_PeekRAM(uint32 A);
 void SOUND_PokeRAM(uint32 A, uint8 V);
+uint8 SOUND_PeekSlotReg(uint32 A);
 
 uint64 SOUND_PeekMPROG(uint32 A);
 void SOUND_PokeMPROG(uint32 A, uint64 V);
