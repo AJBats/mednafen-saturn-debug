@@ -32,10 +32,17 @@ done
 cp -rn /usr/x86_64-w64-mingw32/include/SDL2 $GCC494_SYSROOT/include/ 2>/dev/null || true
 
 # GCC 4.9.4's libmsvcrt.a is missing _wassert and __acrt_iob_func.
-# Replace with system GCC 13's libmsvcrt.a which has them.
-cp -f /usr/x86_64-w64-mingw32/lib/libmsvcrt.a $GCC494_SYSROOT/lib/
+# Replace with system GCC 13's libmsvcrt.a which has them. The sysroot may
+# be root-owned (built with sudo), so only copy when it differs.
+cmp -s /usr/x86_64-w64-mingw32/lib/libmsvcrt.a $GCC494_SYSROOT/lib/libmsvcrt.a ||
+  cp -f /usr/x86_64-w64-mingw32/lib/libmsvcrt.a $GCC494_SYSROOT/lib/
 
-# Configure with GCC 4.9.4 — ONLY our sysroot in library paths
+# Configure with GCC 4.9.4 — ONLY our sysroot in library paths.
+# FLAC's flags are given so configure doesn't ask pkg-config, which answers
+# with the system mingw-w64 paths. src/Makefile.am puts FLAC_CFLAGS in DEFS,
+# so those would compile part of the tree against GCC 13's headers (link
+# error: _wassert defined twice), and make's autotools re-run on a fresh
+# clone regenerates the Makefiles from these arguments, undoing any sed.
 ./configure \
   --host=x86_64-w64-mingw32 \
   --disable-nls \
@@ -44,7 +51,9 @@ cp -f /usr/x86_64-w64-mingw32/lib/libmsvcrt.a $GCC494_SYSROOT/lib/
   CFLAGS="-O2 -I$GCC494_SYSROOT/include/SDL2 -DFLAC__NO_DLL" \
   CXXFLAGS="-O2 -I$GCC494_SYSROOT/include/SDL2 -DFLAC__NO_DLL" \
   CPPFLAGS="-DUNICODE -D_UNICODE -D_LFS64_LARGEFILE=1 -I$GCC494_SYSROOT/include" \
-  LDFLAGS="-L$GCC494_SYSROOT/lib -static"
+  LDFLAGS="-L$GCC494_SYSROOT/lib -static" \
+  FLAC_CFLAGS="-DFLAC__NO_DLL" \
+  FLAC_LIBS="-lFLAC"
 
 # Debug mode: pass --debug as first argument
 DEBUG_MODE=0

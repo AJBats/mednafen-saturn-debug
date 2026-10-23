@@ -120,8 +120,10 @@ mednafen\src\mednafen.exe "path\to\game.cue"
 ## What the build script does
 
 1. Copies SDL2/FLAC/zlib/iconv static libs into GCC 4.9.4 sysroot
-2. Replaces GCC 4.9.4's `libmsvcrt.a` with system's (adds `_wassert`, `__acrt_iob_func`)
+2. Replaces GCC 4.9.4's `libmsvcrt.a` with system's (adds `_wassert`, `__acrt_iob_func`),
+   skipping the copy when they're already identical (the sysroot may be root-owned)
 3. Runs `./configure` with `--disable-sdltest` (WSL runs .exe, fools cross-compile detection)
+   and FLAC's flags given (see Gotchas)
 4. Patches Makefile to remove system GCC 13 include/library paths that configure injects
 5. Compiles `automation_stubs.cpp` (stock ss.cpp doesn't have automation hooks)
 6. Builds with `-lssp` (FLAC lib uses stack protector) and `-liconv`
@@ -133,8 +135,13 @@ mednafen\src\mednafen.exe "path\to\game.cue"
    Windows to load. Always strip after linking.
 
 2. **System paths leak into Makefile**: Configure detects system mingw-w64 at
-   `/usr/x86_64-w64-mingw32/` and injects its include/lib paths. The build script
-   removes these with `sed` so only GCC 4.9.4's sysroot is used.
+   `/usr/x86_64-w64-mingw32/` and injects its include/lib paths: pkg-config's
+   answer for FLAC lands in every Makefile's DEFS. The build script passes
+   `FLAC_CFLAGS`/`FLAC_LIBS` to configure so pkg-config isn't asked. A `sed` on
+   the Makefiles isn't enough: on a fresh clone the file timestamps make `make`
+   re-run aclocal/autoconf and configure, regenerating the Makefiles. Mixed
+   headers show up as a link error, `_wassert` defined twice (libmingwex and
+   the system `libmsvcrt.a`).
 
 3. **WSL defeats cross-compile detection**: WSL can run Windows .exe files, so
    configure's cross-compilation test passes and it tries to run SDL test programs.
