@@ -216,6 +216,9 @@ enum SaturnButton {
 // It does not suppress real keyboard input -- both sources contribute.
 static uint16_t input_buttons = 0;  // bitmask of pressed buttons
 static bool input_override = false;
+// Port 2's, from input playback only (traces record both ports).
+static uint16_t input_buttons2 = 0;
+static bool input_override2 = false;
 
 // Cached framebuffer for instant screenshots (no frame advance needed).
 // Updated every frame in Automation_Poll with a full copy of the pixel data.
@@ -575,6 +578,7 @@ static uint32_t poke_playback_halt_pc = 0;
 // Input trace state -- logs real keyboard input changes with frame numbers
 static FILE* input_trace_file = nullptr;
 static uint16_t last_traced_input = 0;
+static uint16_t last_traced_input2 = 0; // port 2, logged with a P2_ prefix
 
 // Input playback state -- replays recorded input traces.
 // Events are loaded into a vector on input_playback <path>.
@@ -583,6 +587,7 @@ struct InputEvent {
  uint64_t frame;
  bool press;     // true=press, false=release
  int button;     // BTN_* enum value
+ int port;       // 0, or 1 for port 2 (P2_ names)
 };
 static std::vector<InputEvent> playback_events;
 static size_t playback_index = 0;        // next event to process
@@ -1377,8 +1382,9 @@ static void process_command(const std::string& line)
    if (input_trace_file) fclose(input_trace_file);
    input_trace_file = fopen(path.c_str(), "w");
    if (input_trace_file) {
-    fprintf(input_trace_file, "# Input trace -- frame PRESS/RELEASE BUTTON\n");
+    fprintf(input_trace_file, "# Input trace -- frame PRESS/RELEASE BUTTON (P2_ for port 2)\n");
     last_traced_input = 0;
+    last_traced_input2 = 0;
     write_ack("ok input_trace " + path);
    } else {
     write_ack("error input_trace: cannot open " + path);
@@ -1410,12 +1416,14 @@ static void process_command(const std::string& line)
      uint64_t fr = 0;
      char action[32] = {0}, button[32] = {0};
      if (sscanf(line, "frame=%llu %31s %31s", (unsigned long long*)&fr, action, button) == 3) {
-      int b = parse_button(button);
+      int port = (strncmp(button, "P2_", 3) == 0) ? 1 : 0;
+      int b = parse_button(button + port * 3);
       if (b >= 0) {
        InputEvent ev;
        ev.frame = fr;
        ev.press = (strcmp(action, "PRESS") == 0);
        ev.button = b;
+       ev.port = port;
        playback_events.push_back(ev);
       }
      }
@@ -1424,6 +1432,8 @@ static void process_command(const std::string& line)
     // Clear current input state for clean playback
     input_buttons = 0;
     input_override = false;
+    input_buttons2 = 0;
+    input_override2 = false;
     playback_base_frame = frame_counter;
     playback_active = true;
     char buf[256];
@@ -2421,12 +2431,13 @@ void Automation_Poll(const MDFN_Surface* surface, const MDFN_Rect* rect, const i
   while (playback_index < playback_events.size()
          && playback_events[playback_index].frame <= rel_frame) {
    const auto& ev = playback_events[playback_index];
+   uint16_t& buttons = ev.port ? input_buttons2 : input_buttons;
    if (ev.press) {
-    input_buttons |= (1 << ev.button);
+    buttons |= (1 << ev.button);
    } else {
-    input_buttons &= ~(1 << ev.button);
+    buttons &= ~(1 << ev.button);
    }
-   input_override = true;
+   (ev.port ? input_override2 : input_override) = true;
    playback_index++;
   }
   // Auto-stop when all events consumed
@@ -2573,40 +2584,48 @@ void Automation_LogSystemCommand(const char* cmd_name)
 
 bool Automation_GetInput(unsigned port, uint8_t* data, unsigned data_size)
 {
+ if (port > 1)
+  return false;
+
  // OR automation button presses into the existing data.
  // NOTE: This is additive -- real keyboard input is NOT suppressed.
  // Both automation and keyboard presses contribute to the final state.
- if (automation_active && input_override && port == 0 && data_size >= 2) {
-  data[0] |= (uint8_t)(input_buttons & 0xFF);
-  data[1] |= (uint8_t)((input_buttons >> 8) & 0xFF);
+ const bool override = port ? input_override2 : input_override;
+ const uint16_t buttons = port ? input_buttons2 : input_buttons;
+ if (automation_active && override && data_size >= 2) {
+  data[0] |= (uint8_t)(buttons & 0xFF);
+  data[1] |= (uint8_t)((buttons >> 8) & 0xFF);
  }
 
  // Input tracing: log combined button state (keyboard + automation) AFTER override.
- // This captures the full input picture — what the game actually sees.
- if (automation_active && input_trace_file && port == 0 && data_size >= 2) {
+ // This captures the full input picture — what the game actually sees, on
+ // both ports (port 2's names prefixed P2_).
+ uint16_t& last_traced = port ? last_traced_input2 : last_traced_input;
+ if (automation_active && input_trace_file && data_size >= 2) {
   uint16_t cur = data[0] | ((uint16_t)data[1] << 8);
-  if (cur != last_traced_input) {
+  if (cur != last_traced) {
    static const struct { int bit; const char* name; } btn_names[] = {
     {BTN_Z, "Z"}, {BTN_Y, "Y"}, {BTN_X, "X"}, {BTN_R, "R"},
     {BTN_UP, "UP"}, {BTN_DOWN, "DOWN"}, {BTN_LEFT, "LEFT"}, {BTN_RIGHT, "RIGHT"},
     {BTN_B, "B"}, {BTN_C, "C"}, {BTN_A, "A"}, {BTN_START, "START"}, {BTN_L, "L"},
    };
-   uint16_t changed = cur ^ last_traced_input;
+   uint16_t changed = cur ^ last_traced;
    for (int i = 0; i < 13; i++) {
     if (changed & (1 << btn_names[i].bit)) {
      bool pressed = (cur & (1 << btn_names[i].bit)) != 0;
-     fprintf(input_trace_file, "frame=%llu %s %s\n",
+     fprintf(input_trace_file, "frame=%llu %s %s%s\n",
       (unsigned long long)frame_counter,
       pressed ? "PRESS" : "RELEASE",
+      port ? "P2_" : "",
       btn_names[i].name);
     }
    }
    fflush(input_trace_file);
-   last_traced_input = cur;
+   last_traced = cur;
   }
  }
 
- return (automation_active && input_override && port == 0);
+ return (automation_active && override);
 }
 
 bool Automation_ConsumePendingShowWindow(void)
