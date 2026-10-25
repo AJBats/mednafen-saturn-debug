@@ -83,6 +83,18 @@ static int32 CycleCounter;
 static int32 CommandPhase;
 static uint16 CommandData[0x10];
 uint32 DTACounter;
+uint32 CostTexel16, CostTexPixel16, CostGouraud16, CostPixel16, CostLine16;
+uint32 ExtraCycles16;
+
+void SetDrawCosts(uint32 texel, uint32 tex_pixel, uint32 gouraud, uint32 pixel, uint32 line)
+{
+ CostTexel16 = texel;
+ CostTexPixel16 = tex_pixel;
+ CostGouraud16 = gouraud;
+ CostPixel16 = pixel;
+ CostLine16 = line;
+ ExtraCycles16 = 0;
+}
 
 static bool vb_status, hb_status;
 static bool vbcdpending;

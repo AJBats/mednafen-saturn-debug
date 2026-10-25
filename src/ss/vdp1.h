@@ -102,6 +102,12 @@ enum
 };
 uint32 GetRegister(const unsigned id, char* const special, const uint32 special_len) MDFN_COLD;
 void SetRegister(const unsigned id, const uint32 value) MDFN_COLD;
+
+// Drawing time a real Saturn takes beyond this emulation's model (the
+// ss.vdp1.cost.* settings, to calibrate it against hardware measurements):
+// extra cycles, in sixteenths, per texel read, per textured pixel, per
+// gouraud-shaded pixel, per pixel and per line. All 0 by default.
+void SetDrawCosts(uint32 texel, uint32 tex_pixel, uint32 gouraud, uint32 pixel, uint32 line) MDFN_COLD;
 }
 
 }

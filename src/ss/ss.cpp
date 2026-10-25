@@ -2794,6 +2794,8 @@ static void MDFN_COLD InitCommon(unsigned cpucache_emumode, unsigned horrible_ha
   STVIO_Init(sgi);
 
  VDP1::Init();
+ VDP1::SetDrawCosts(MDFN_GetSettingUI("ss.vdp1.cost.texel"), MDFN_GetSettingUI("ss.vdp1.cost.tex_pixel"),
+	MDFN_GetSettingUI("ss.vdp1.cost.gouraud"), MDFN_GetSettingUI("ss.vdp1.cost.pixel"), MDFN_GetSettingUI("ss.vdp1.cost.line"));
  VDP2::Init(PAL, vdp2_affinity);
  CDB_Init();
  SOUND_Init(cart_type == CART_STV);
@@ -3788,6 +3790,12 @@ static const MDFNSetting SSSettings[] =
 #endif
 
  { "ss.dbg_exe_cdpath", MDFNSF_SUPPRESS_DOC | MDFNSF_CAT_PATH, gettext_noop("CD image to use with bootable cart ROM image loading."), NULL, MDFNST_STRING, "" },
+
+ { "ss.vdp1.cost.texel", MDFNSF_NOFLAGS, gettext_noop("Extra VDP1 cycles per texel read, in sixteenths."), gettext_noop("Drawing time calibration against real hardware; 0 for the stock timing."), MDFNST_UINT, "0", "0", "4096" },
+ { "ss.vdp1.cost.tex_pixel", MDFNSF_NOFLAGS, gettext_noop("Extra VDP1 cycles per textured pixel, in sixteenths."), NULL, MDFNST_UINT, "0", "0", "4096" },
+ { "ss.vdp1.cost.gouraud", MDFNSF_NOFLAGS, gettext_noop("Extra VDP1 cycles per gouraud-shaded pixel, in sixteenths."), NULL, MDFNST_UINT, "0", "0", "4096" },
+ { "ss.vdp1.cost.pixel", MDFNSF_NOFLAGS, gettext_noop("Extra VDP1 cycles per pixel, in sixteenths."), NULL, MDFNST_UINT, "0", "0", "4096" },
+ { "ss.vdp1.cost.line", MDFNSF_NOFLAGS, gettext_noop("Extra VDP1 cycles per line, in sixteenths."), NULL, MDFNST_UINT, "0", "0", "65535" },
 
  { "ss.dbg_cem", MDFNSF_SUPPRESS_DOC | MDFNSF_NONPERSISTENT, gettext_noop("Cache emulation mode debug override."), NULL, MDFNST_ENUM, "auto", NULL, NULL, NULL, NULL, CEM_List },
  { "ss.dbg_hh", MDFNSF_SUPPRESS_DOC | MDFNSF_NONPERSISTENT, gettext_noop("Horrible hacks debug override."), NULL, MDFNST_MULTI_ENUM, "auto", NULL, NULL, NULL, NULL, HH_List },

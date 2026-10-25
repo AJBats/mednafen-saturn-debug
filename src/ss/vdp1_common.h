@@ -437,11 +437,20 @@ MDFN_HIDE extern prim_data PrimData;
 static INLINE int32 AdjustDrawTiming(const int32 cycles)
 {
  MDFN_HIDE extern uint32 DTACounter;
+ MDFN_HIDE extern uint32 ExtraCycles16, CostLine16;
  uint32 extra_cycles;
 
  DTACounter += cycles * ((TVMR & TVMR_8BPP) ? 24 : 48);
  extra_cycles = DTACounter >> 8;
  DTACounter &= 0xFF;
+
+ // calibration (SetDrawCosts): the line's and what DrawLine counted
+ if(cycles)
+ {
+  ExtraCycles16 += CostLine16;
+  extra_cycles += ExtraCycles16 >> 4;
+  ExtraCycles16 &= 0xF;
+ }
 
  return cycles + extra_cycles;
 }
@@ -485,11 +494,15 @@ static int32 DrawLine(bool* need_line_resume)
  const uint32 uclipo1 = ((UserClipY1 & 0x3FF) << 16) | (UserClipX1 & 0x3FF);
  line_inner_data lid = LineInnerData;
  int32 ret = 0;
+ MDFN_HIDE extern uint32 ExtraCycles16, CostTexel16, CostTexPixel16, CostGouraud16, CostPixel16;
+ const uint32 pixel_cost16 = CostPixel16 + (Textured ? CostTexPixel16 : 0) + (GouraudEn ? CostGouraud16 : 0);
 
  do
  {
   bool transparent;
   uint16 pix;
+
+  ExtraCycles16 += pixel_cost16;
 
   if(Textured)
   {
@@ -497,6 +510,8 @@ static int32 DrawLine(bool* need_line_resume)
    while(lid.t.IncPending())
    {
     int32 tx = lid.t.DoPendingInc();
+
+    ExtraCycles16 += CostTexel16;
 
     /*ret += (bool)t.IncPending();*/
 
