@@ -108,6 +108,10 @@ void SetRegister(const unsigned id, const uint32 value) MDFN_COLD;
 // extra cycles, in sixteenths, per texel read, per textured pixel, per
 // gouraud-shaded pixel, per pixel and per line. All 0 by default.
 void SetDrawCosts(uint32 texel, uint32 tex_pixel, uint32 gouraud, uint32 pixel, uint32 line) MDFN_COLD;
+
+// Logs the next plot to a CSV file: a row per command with its words and what
+// it cost (cycles, lines, pixels, texels read, gouraud pixels).
+void StartCostLog(const char* path) MDFN_COLD;
 }
 
 }

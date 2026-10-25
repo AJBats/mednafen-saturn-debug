@@ -86,6 +86,67 @@ uint32 DTACounter;
 uint32 CostTexel16, CostTexPixel16, CostGouraud16, CostPixel16, CostLine16;
 uint32 ExtraCycles16;
 
+// The cost log (StartCostLog): counters the drawing code advances, and a
+// record per command of the plot being logged.
+uint32 LogLines, LogPixels, LogTexels, LogGouraud;
+static uint32 LogCycles;
+static bool CostLogArmed, CostLogging, CostCurValid;
+static std::string CostLogPath;
+struct CostRecord
+{
+ uint32 addr;
+ uint16 cmd[0x10];
+ uint32 cycles, lines, pixels, texels, gouraud;
+};
+static std::vector<CostRecord> CostLog;
+static CostRecord CostCur;
+
+void StartCostLog(const char* path)
+{
+ CostLogPath = path;
+ CostLogArmed = true;
+}
+
+// At each command fetch: closes the last command's record, opens this one's.
+static void CostLogCommand(uint32 addr, const uint16* cmd)
+{
+ if(CostCurValid)
+ {
+  CostCur.cycles = LogCycles;
+  CostCur.lines = LogLines;
+  CostCur.pixels = LogPixels;
+  CostCur.texels = LogTexels;
+  CostCur.gouraud = LogGouraud;
+  CostLog.push_back(CostCur);
+ }
+ LogCycles = LogLines = LogPixels = LogTexels = LogGouraud = 0;
+ CostCur.addr = addr;
+ memcpy(CostCur.cmd, cmd, sizeof(CostCur.cmd));
+ CostCurValid = true;
+}
+
+static void CostLogEnd(void)
+{
+ CostLogCommand(0, CommandData);
+ FILE* f = fopen(CostLogPath.c_str(), "w");
+ if(f)
+ {
+  fprintf(f, "index,addr,ctrl,link,pmod,colr,srca,size,xa,ya,xb,yb,xc,yc,xd,yd,grda,cycles,lines,pixels,texels,gouraud\n");
+  for(size_t i = 0; i < CostLog.size(); i++)
+  {
+   const CostRecord& r = CostLog[i];
+   fprintf(f, "%u,%u,%u,%u,%u,%u,%u,%u", (unsigned)i, (unsigned)(r.addr << 1), r.cmd[0], r.cmd[1], r.cmd[2], r.cmd[3], r.cmd[4], r.cmd[5]);
+   for(unsigned j = 0; j < 8; j++)
+    fprintf(f, ",%d", sign_x_to_s32(13, r.cmd[6 + j]));
+   fprintf(f, ",%u,%u,%u,%u,%u,%u\n", r.cmd[0xE], r.cycles, r.lines, r.pixels, r.texels, r.gouraud);
+  }
+  fclose(f);
+ }
+ CostLog.clear();
+ CostLogging = false;
+ CostCurValid = false;
+}
+
 void SetDrawCosts(uint32 texel, uint32 tex_pixel, uint32 gouraud, uint32 pixel, uint32 line)
 {
  CostTexel16 = texel;
@@ -493,6 +554,7 @@ MDFN_HIDE extern uint32 (MDFN_FASTCALL *const TexFetchTab[0x20])(uint32 x) =
 
 bool SetupDrawLine(int32* const cycle_counter, const bool AA, const bool Textured, const uint16 mode)
 {
+ LogLines++;
  const bool HSS = (mode & 0x1000);
  const bool PCD = (mode & 0x800);
  const bool UserClipEn = (mode & 0x400);
@@ -717,6 +779,7 @@ enum : int { CommandPhaseBias = __COUNTER__ + 1 };
 #define VDP1_EAT_CLOCKS(n)									\
 		{										\
 		 CycleCounter -= (n);								\
+		 LogCycles += (n);								\
 		 case __COUNTER__:								\
 		 if(CycleCounter <= 0)								\
 		 {										\
@@ -742,6 +805,8 @@ static INLINE void DoDrawing(void)
 
    // Fetch command data
    memcpy(CommandData, &VRAM[CurCommandAddr], sizeof(CommandData));
+   if(MDFN_UNLIKELY(CostLogging))
+    CostLogCommand(CurCommandAddr, CommandData);
 
    VDP1_EAT_CLOCKS(16);
 
@@ -754,6 +819,8 @@ static INLINE void DoDrawing(void)
    {
     if(MDFN_UNLIKELY((CommandData[0] & 0xF) >= 0xC))
     {
+     if(CostLogging)
+      CostLogEnd();
      DrawingActive = false;
      VRAMUsageEnd();
      goto Breakout;
@@ -801,6 +868,8 @@ static INLINE void DoDrawing(void)
    else if(MDFN_UNLIKELY(CommandData[0] & 0x8000))
    {
     SS_DBGTI(SS_DBG_VDP1, "[VDP1] Drawing finished at 0x%05x", CurCommandAddr);
+    if(CostLogging)
+     CostLogEnd();
     DrawingActive = false;
     VRAMUsageEnd();
 
@@ -898,6 +967,14 @@ static void StartDrawing(void)
  CurCommandAddr = 0;
  RetCommandAddr = -1;
  DrawingActive = true;
+
+ if(CostLogArmed)
+ {
+  CostLogArmed = false;
+  CostLogging = true;
+  CostCurValid = false;
+  CostLog.clear();
+ }
  CommandPhase = 0;
  VRAMUsageStart();
 

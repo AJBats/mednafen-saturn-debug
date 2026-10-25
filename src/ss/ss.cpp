@@ -1289,6 +1289,11 @@ void Automation_DumpSlaveRegsBin(const char* path)
 }
 
 // Automation: dump VDP2 internal register state to binary file.
+void Automation_VDP1CostLog(const char* path)
+{
+ VDP1::StartCostLog(path);
+}
+
 void Automation_DumpVDP2RegsBin(const char* path)
 {
  VDP2::DumpRawRegsBin(path);

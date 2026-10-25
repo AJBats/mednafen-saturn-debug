@@ -32,6 +32,9 @@ namespace MDFN_IEN_SS {
  void Automation_DumpSlaveRegsBin(const char* path);
  void Automation_DumpVDP2RegsBin(const char* path);
 
+ // Logs the next VDP1 plot to a CSV: a row per command and what it cost.
+ void Automation_VDP1CostLog(const char* path);
+
  // CPU hook control
  void Automation_EnableCPUHook(void);
  void Automation_DisableCPUHook(void);

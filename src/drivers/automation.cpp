@@ -21,6 +21,7 @@
  *   dump_mem_bin <addr> <sz> <path> - Write raw memory bytes to binary file (max 1MB)
  *   poke <addr> <b0> [b1 ...]    - Write bytes to memory (hex addr, hex bytes). Updates cache.
  *   dump_region <name> <path>  - Dump named region: wram_high wram_low vdp1_vram vdp2_vram vdp2_cram sound_ram
+ *   vdp1_cost_log <path>       - Log the next VDP1 plot: a CSV row per command with its cost
  *   dump_vdp2_regs <path>      - Write VDP2 register state to binary file
  *   dump_cycle                 - Report current absolute master cycle count
  *   run_to_cycle <N>           - Run until master cycle count reaches N
@@ -946,6 +947,17 @@ static void process_command(const std::string& line)
    } else {
     write_ack("error dump_region: cannot open " + path);
    }
+  }
+ }
+ else if (cmd == "vdp1_cost_log") {
+  // Usage: vdp1_cost_log <path>; the file is written when that plot ends
+  std::string path;
+  iss >> path;
+  if (path.empty()) {
+   write_ack("error vdp1_cost_log: no path");
+  } else {
+   MDFN_IEN_SS::Automation_VDP1CostLog(path.c_str());
+   write_ack("ok vdp1_cost_log " + path);
   }
  }
  else if (cmd == "dump_vdp2_regs") {

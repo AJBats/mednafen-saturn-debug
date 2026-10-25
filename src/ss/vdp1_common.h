@@ -495,6 +495,7 @@ static int32 DrawLine(bool* need_line_resume)
  line_inner_data lid = LineInnerData;
  int32 ret = 0;
  MDFN_HIDE extern uint32 ExtraCycles16, CostTexel16, CostTexPixel16, CostGouraud16, CostPixel16;
+ MDFN_HIDE extern uint32 LogPixels, LogTexels, LogGouraud;
  const uint32 pixel_cost16 = CostPixel16 + (Textured ? CostTexPixel16 : 0) + (GouraudEn ? CostGouraud16 : 0);
 
  do
@@ -503,6 +504,9 @@ static int32 DrawLine(bool* need_line_resume)
   uint16 pix;
 
   ExtraCycles16 += pixel_cost16;
+  LogPixels++;
+  if(GouraudEn)
+   LogGouraud++;
 
   if(Textured)
   {
@@ -512,6 +516,7 @@ static int32 DrawLine(bool* need_line_resume)
     int32 tx = lid.t.DoPendingInc();
 
     ExtraCycles16 += CostTexel16;
+    LogTexels++;
 
     /*ret += (bool)t.IncPending();*/
 
