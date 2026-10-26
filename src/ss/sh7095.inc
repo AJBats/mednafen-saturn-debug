@@ -300,6 +300,8 @@ void SH7095::TruePowerOn(void)
 
  MA_until = timestamp;
  MM_until = timestamp;
+ MAC_ready = timestamp;
+ MAC_frac16 = 0;
  write_finish_timestamp = timestamp;
 
  PC = 0;
@@ -494,6 +496,7 @@ void SH7095::AdjustTS(int32 delta)
 
  ATSD(MA_until);
  ATSD(MM_until);
+ ATSD(MAC_ready);
 
  for(unsigned i = 0; i < 16; i++)
   ATSD(WB_until[i]);
@@ -3707,6 +3710,8 @@ void SH7095::StateAction(StateMem* sm, const unsigned load, const bool data_only
   SFVAR(timestamp),
   SFVAR(MA_until),
   SFVAR(MM_until),
+  SFVAR(MAC_ready),
+  SFVAR(MAC_frac16),
   SFVAR(write_finish_timestamp),
   SFVAR(WB_until),
   SFVAR(UCRead_IF_Kludge),
@@ -3993,6 +3998,7 @@ void SH7095::PostStateLoad(const unsigned state_version, const bool recorded_nee
 
   clamp(&MA_until, -1000000, 1000000);
   clamp(&MM_until, -1000000, 1000000);
+  clamp(&MAC_ready, -1000000, 1000000);
 
   for(unsigned i = 0; i < 16; i++)
    clamp(&WB_until[i], -1000000, 1000000);

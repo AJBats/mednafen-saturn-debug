@@ -1736,6 +1736,11 @@ void Automation_SetDeterministic(void)
  SMPC_SetRTC(&fixed_time, 1); // lang=1 (English)
 }
 
+// SH-2 instruction costs to calibrate against a Saturn (ss.sh2.cost.*):
+// extra sixteenths of a cycle per MAC.W, cycles before MACH/MACL can be read
+// after a MAC.W, and extra multiplier cycles for MUL.L and DMULS.L/DMULU.L.
+static uint32 SH2_Cost_MacW16, SH2_Cost_MacWait, SH2_Cost_MulL, SH2_Cost_DMul;
+
 #include "sh7095.inc"
 
 //
@@ -2798,6 +2803,11 @@ static void MDFN_COLD InitCommon(unsigned cpucache_emumode, unsigned horrible_ha
  if(cart_type == CART_STV)
   STVIO_Init(sgi);
 
+ SH2_Cost_MacW16 = MDFN_GetSettingUI("ss.sh2.cost.mac_w");
+ SH2_Cost_MacWait = MDFN_GetSettingUI("ss.sh2.cost.mac_wait");
+ SH2_Cost_MulL = MDFN_GetSettingUI("ss.sh2.cost.mul_l");
+ SH2_Cost_DMul = MDFN_GetSettingUI("ss.sh2.cost.dmul");
+
  VDP1::Init();
  VDP1::SetDrawCosts(MDFN_GetSettingUI("ss.vdp1.cost.texel"), MDFN_GetSettingUI("ss.vdp1.cost.tex_pixel"),
 	MDFN_GetSettingUI("ss.vdp1.cost.gouraud"), MDFN_GetSettingUI("ss.vdp1.cost.pixel"), MDFN_GetSettingUI("ss.vdp1.cost.line"));
@@ -3800,6 +3810,10 @@ static const MDFNSetting SSSettings[] =
  { "ss.vdp1.cost.tex_pixel", MDFNSF_NOFLAGS, gettext_noop("Extra VDP1 cycles per textured pixel, in sixteenths."), NULL, MDFNST_UINT, "0", "0", "4096" },
  { "ss.vdp1.cost.gouraud", MDFNSF_NOFLAGS, gettext_noop("Extra VDP1 cycles per gouraud-shaded pixel, in sixteenths."), NULL, MDFNST_UINT, "0", "0", "4096" },
  { "ss.vdp1.cost.pixel", MDFNSF_NOFLAGS, gettext_noop("Extra VDP1 cycles per pixel, in sixteenths."), NULL, MDFNST_UINT, "0", "0", "4096" },
+ { "ss.sh2.cost.mac_w", MDFNSF_NOFLAGS, gettext_noop("Extra SH-2 cycles per MAC.W, in sixteenths."), gettext_noop("CPU timing calibration against real hardware; 0 for the stock timing."), MDFNST_UINT, "0", "0", "256" },
+ { "ss.sh2.cost.mac_wait", MDFNSF_NOFLAGS, gettext_noop("SH-2 cycles before MACH/MACL can be read after a MAC.W."), NULL, MDFNST_UINT, "0", "0", "16" },
+ { "ss.sh2.cost.mul_l", MDFNSF_NOFLAGS, gettext_noop("Extra SH-2 multiplier cycles per MUL.L."), NULL, MDFNST_UINT, "0", "0", "16" },
+ { "ss.sh2.cost.dmul", MDFNSF_NOFLAGS, gettext_noop("Extra SH-2 multiplier cycles per DMULS.L/DMULU.L."), NULL, MDFNST_UINT, "0", "0", "16" },
  { "ss.vdp1.cost.line", MDFNSF_NOFLAGS, gettext_noop("Extra VDP1 cycles per line, in sixteenths."), NULL, MDFNST_UINT, "0", "0", "65535" },
 
  { "ss.dbg_cem", MDFNSF_SUPPRESS_DOC | MDFNSF_NONPERSISTENT, gettext_noop("Cache emulation mode debug override."), NULL, MDFNST_ENUM, "auto", NULL, NULL, NULL, NULL, CEM_List },

@@ -898,6 +898,13 @@ switch(Pipe_ID >> 24)
 	 SetMAC64(GetMAC64() + (int64)opexec_MAC_W_m0 * opexec_MAC_W_m1);
 
 	timestamp++;
+
+	// calibration: a Saturn takes longer per MAC.W, and longer before
+	// MACH/MACL can be read after one
+	MAC_frac16 += SH2_Cost_MacW16;
+	timestamp += MAC_frac16 >> 4;
+	MAC_frac16 &= 15;
+	MAC_ready = timestamp + SH2_Cost_MacWait;
  END_OP
 
 
@@ -910,7 +917,7 @@ switch(Pipe_ID >> 24)
 	 timestamp++;
 
 	 MA_until = std::max<sscpu_timestamp_t>(std::max<sscpu_timestamp_t>(MA_until, MM_until), timestamp + 1);
-	 MM_until = MA_until + 4;
+	 MM_until = MA_until + 4 + SH2_Cost_DMul;
 	 PART_OP_NORMIDIF
 	}
 	CONST_VAR(unsigned, n) = instr_nyb2;
@@ -931,7 +938,7 @@ switch(Pipe_ID >> 24)
 	 timestamp++;
 
 	 MA_until = std::max<sscpu_timestamp_t>(std::max<sscpu_timestamp_t>(MA_until, MM_until), timestamp + 1);
-	 MM_until = MA_until + 4;
+	 MM_until = MA_until + 4 + SH2_Cost_DMul;
 	 PART_OP_NORMIDIF
 	}
 	CONST_VAR(unsigned, n) = instr_nyb2;
@@ -952,7 +959,7 @@ switch(Pipe_ID >> 24)
 	 timestamp++;
 
 	 MA_until = std::max<sscpu_timestamp_t>(std::max<sscpu_timestamp_t>(MA_until, MM_until), timestamp + 1);
-	 MM_until = MA_until + 4;
+	 MM_until = MA_until + 4 + SH2_Cost_MulL;
 	 PART_OP_NORMIDIF
 	}
 	CONST_VAR(unsigned, n) = instr_nyb2;
@@ -1823,6 +1830,9 @@ switch(Pipe_ID >> 24)
 	{
 	 CONST_VAR(unsigned, n) = instr_nyb2;
 	 const unsigned sri = (instr >> 4) & 0x3;
+
+	 if(sri < 2 && timestamp < MAC_ready)	// MACH, MACL
+	  timestamp = MAC_ready;
 
 	 R[n] = SysRegs[sri];
 	}

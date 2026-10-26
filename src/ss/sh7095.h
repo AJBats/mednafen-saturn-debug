@@ -91,6 +91,8 @@ class SH7095 final
  sscpu_timestamp_t timestamp;
  sscpu_timestamp_t MA_until;
  sscpu_timestamp_t MM_until;
+ sscpu_timestamp_t MAC_ready;	// ss.sh2.cost.mac_wait: STS MACH/MACL waits for the last MAC.W
+ uint32 MAC_frac16;		// ss.sh2.cost.mac_w's sixteenths not yet charged
  sscpu_timestamp_t write_finish_timestamp;
 
  INLINE void SetT(bool new_value) { SR &= ~1; SR |= new_value; }
