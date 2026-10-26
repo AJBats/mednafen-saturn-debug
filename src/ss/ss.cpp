@@ -3816,7 +3816,7 @@ static const MDFNSetting SSSettings[] =
  { "ss.sh2.cost.dmul", MDFNSF_NOFLAGS, gettext_noop("Extra SH-2 multiplier cycles per DMULS.L/DMULU.L."), NULL, MDFNST_UINT, "0", "0", "16" },
  { "ss.vdp1.cost.line", MDFNSF_NOFLAGS, gettext_noop("Extra VDP1 cycles per line, in sixteenths."), NULL, MDFNST_UINT, "0", "0", "65535" },
 
- { "ss.dbg_cem", MDFNSF_SUPPRESS_DOC | MDFNSF_NONPERSISTENT, gettext_noop("Cache emulation mode debug override."), NULL, MDFNST_ENUM, "auto", NULL, NULL, NULL, NULL, CEM_List },
+ { "ss.dbg_cem", MDFNSF_SUPPRESS_DOC, gettext_noop("Cache emulation mode override; \"full\" emulates the instruction cache too, which unknown discs otherwise run without."), NULL, MDFNST_ENUM, "auto", NULL, NULL, NULL, NULL, CEM_List },
  { "ss.dbg_hh", MDFNSF_SUPPRESS_DOC | MDFNSF_NONPERSISTENT, gettext_noop("Horrible hacks debug override."), NULL, MDFNST_MULTI_ENUM, "auto", NULL, NULL, NULL, NULL, HH_List },
 
  { NULL },
