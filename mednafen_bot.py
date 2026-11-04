@@ -194,13 +194,16 @@ class MednafenBot:
             if wh:
                 home_dir = wh
 
-        # Remove stale lockfile
+        # Remove a stale lockfile. A held one means another Mednafen is running
+        # on this home (the /proc check above sees nothing on Windows): leave
+        # its automation files alone.
         lockfile = os.path.join(home_dir, "mednafen.lck")
         try:
             if os.path.exists(lockfile):
                 os.remove(lockfile)
         except PermissionError:
-            pass
+            print(f"  [!] Another Mednafen is running on home {home_dir}")
+            return False
 
         # Clean IPC files — remove ALL files in IPC dir to prevent stale
         # artifacts from previous sessions (traces, snapshots, etc.)
@@ -246,7 +249,7 @@ class MednafenBot:
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self.proc.poll() is not None:
-                with open(self.stderr_file.name) as f:
+                with open(self.stderr_file.name, encoding="utf-8", errors="replace") as f:
                     print(f"  Mednafen exited with code {self.proc.returncode}: {f.read().strip()}")
                 return False
             if os.path.exists(self.ack_file):

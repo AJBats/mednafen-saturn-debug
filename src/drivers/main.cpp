@@ -67,7 +67,7 @@
 #include <mednafen/file.h>
 #include <mednafen/AtomicFIFO.h>
 
-static bool SuppressErrorPopups;	// On unless env variable "MEDNAFEN_NOPOPUPS" is set to 0
+static bool SuppressErrorPopups;	// On with --automation; env variable "MEDNAFEN_NOPOPUPS" overrides that either way
 static FILE* LauncherStderr = stderr;	// Where errors and warnings must arrive; RedirectSTDxxx() keeps it from the redirection
 
 static int StateFuzzTest = false;
@@ -2281,11 +2281,16 @@ int main(int argc, char *argv[])
 #endif
 	// SuppressErrorPopups must be set very early.
 	{
-	 // Tools drive this fork, with nobody at the screen to click OK: a dialog only interrupts the
-	 // person at the machine and blocks the run.  Errors go to the launcher's stderr instead.
+	 // A tool passes --automation and has nobody at the screen to click OK: a dialog only interrupts
+	 // the person at the machine and blocks the run, so its errors go to the launcher's stderr alone.
+	 // Started by hand, the dialog is the one place the person would see why Mednafen didn't start.
 	 char* mnp = getenv("MEDNAFEN_NOPOPUPS");
+	 bool automated = false;
 
-	 SuppressErrorPopups = mnp ? atoi(mnp) : true;
+	 for(int i = 1; i < argc; i++)
+	  automated |= !MDFN_strazicmp(argv[i], "--automation") || !MDFN_strazicmp(argv[i], "-automation");
+
+	 SuppressErrorPopups = mnp ? atoi(mnp) : automated;
 
 #ifdef WIN32
 	 // for assert() and abort()

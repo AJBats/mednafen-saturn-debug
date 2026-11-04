@@ -200,10 +200,6 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
     _ack_file = os.path.join(ipc, "mednafen_ack.txt")
     _action_file = os.path.join(ipc, "mednafen_action.txt")
 
-    for f in [_ack_file, _action_file]:
-        if os.path.exists(f):
-            os.remove(f)
-
     script_dir = os.path.dirname(os.path.abspath(__file__))
     # Binary policy lives in mednafen_bot: native ELF everywhere, except
     # interactive-with-sound under WSL, which uses the Windows exe (WSLg's
@@ -223,10 +219,20 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
         if wh:
             med_home = wh
 
-    # Remove stale lockfile
+    # Remove a stale lockfile. A held one means another Mednafen is running on
+    # this home (the /proc check above sees nothing on Windows): leave its
+    # automation files alone.
     lockfile = os.path.join(med_home, "mednafen.lck")
-    if os.path.exists(lockfile):
-        os.remove(lockfile)
+    try:
+        if os.path.exists(lockfile):
+            os.remove(lockfile)
+    except PermissionError:
+        return (f"FAIL: another Mednafen is running on home {os.path.abspath(med_home)}. "
+                f"Wait for it to finish or ask the user to close it, then boot again.")
+
+    for f in [_ack_file, _action_file]:
+        if os.path.exists(f):
+            os.remove(f)
 
     env = os.environ.copy()
     env["MEDNAFEN_HOME"] = med_home
@@ -263,7 +269,7 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
     deadline = time.time() + timeout
     while time.time() < deadline:
         if _proc.poll() is not None:
-            with open(stderr_f.name) as f:
+            with open(stderr_f.name, encoding="utf-8", errors="replace") as f:
                 return f"FAIL: Mednafen exited with code {_proc.returncode}: {f.read().strip()}"
         if os.path.exists(_ack_file):
             try:

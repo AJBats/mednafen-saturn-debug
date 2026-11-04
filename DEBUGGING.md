@@ -65,12 +65,21 @@ Key flags:
 - `MEDNAFEN_ALLOWMULTI=1` - allow multiple instances (for parallel comparison)
 - Isolated `HOME` dir avoids lock file conflicts between instances
 
-This fork never opens an error dialog (`MEDNAFEN_NOPOPUPS=0` brings them back).
-Errors and warnings go to the stderr you started it with, so capture that and
-read it when the process exits: a second Mednafen on the same home, or a bad disc
-path, says so there and exits before the `ready` ack, which means the disc has
-loaded. Everything else Mednafen prints goes to `stdout.txt` and `stderr.txt`
+**Always pass `--automation` when a tool or script starts Mednafen.** Without it,
+any startup error opens a dialog on the screen of whoever is at the machine and
+blocks until they click OK. That is for a person starting it by hand. `MEDNAFEN_NOPOPUPS`
+set to 0 or 1 overrides this either way. A window for someone to play is started with
+`--automation` too, then sent `run`, because it starts paused.
+
+With `--automation`, errors and warnings go to the stderr you started it with, so
+capture that and read it when the process exits: a second Mednafen on the same home,
+or a bad disc path, says so there and exits before the `ready` ack, which means the
+disc has loaded. Everything else Mednafen prints goes to `stdout.txt` and `stderr.txt`
 beside the exe, which every instance truncates when it starts.
+
+Check the home's lock before touching the IPC files: on Windows, `os.remove` of
+`mednafen.lck` raises `PermissionError` while another Mednafen holds it, and that
+Mednafen's commands and acks are in those files.
 
 ### Writing Commands (Python Client)
 
