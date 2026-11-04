@@ -18,6 +18,10 @@
 // base_dir: directory for action/ack files (e.g. mednafen base dir)
 void Automation_Init(const std::string& base_dir);
 
+// Tell the launcher the disc has loaded: a launcher waiting for "ready" sees
+// a bad disc as the process exiting, with the reason on its stderr.
+void Automation_Ready(void);
+
 // Poll for commands. Call once per frame from the game thread (MDFND_Update).
 // surface/rect/lw: current framebuffer for screenshot commands
 void Automation_Poll(const MDFN_Surface* surface, const MDFN_Rect* rect, const int32* lw);

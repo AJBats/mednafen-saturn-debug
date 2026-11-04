@@ -67,7 +67,8 @@
 #include <mednafen/file.h>
 #include <mednafen/AtomicFIFO.h>
 
-static bool SuppressErrorPopups;	// Set from env variable "MEDNAFEN_NOPOPUPS"
+static bool SuppressErrorPopups;	// On unless env variable "MEDNAFEN_NOPOPUPS" is set to 0
+static FILE* LauncherStderr = stderr;	// Where errors and warnings must arrive; RedirectSTDxxx() keeps it from the redirection
 
 static int StateFuzzTest = false;
 static int StateSLSTest = false;
@@ -341,6 +342,9 @@ static int RedirectSTDxxx(void)
   fflush(stdout);
   fflush(stderr);
 
+  const int launcher_fd = dup(fileno(stderr));
+  LauncherStderr = (launcher_fd != -1) ? fdopen(launcher_fd, "w") : nullptr;
+
   dup2(new_stdout, fileno(stdout));
   dup2(new_stderr, fileno(stderr));
 
@@ -451,6 +455,12 @@ void Mednafen::MDFND_OutputNotice(MDFN_NoticeType t, const char* s) noexcept
  
   puts(s);
   fflush(stdout);
+
+  if(LauncherStderr)
+  {
+   fprintf(LauncherStderr, "%s\n", s);
+   fflush(LauncherStderr);
+  }
 
   if(StdoutMutex)
    MThreading::Mutex_Unlock(StdoutMutex);
@@ -2076,6 +2086,8 @@ static bool LoadAndRunGame(const char* force_module, const char* path)
  {
   if(LoadGame(force_module, path))
   {
+   Automation_Ready();
+
    const uint64 vt_affinity = MDFN_GetSettingUI("affinity.video");
    const uint64 gt_affinity = MDFN_GetSettingUI("affinity.emu");
 
@@ -2269,12 +2281,11 @@ int main(int argc, char *argv[])
 #endif
 	// SuppressErrorPopups must be set very early.
 	{
+	 // Tools drive this fork, with nobody at the screen to click OK: a dialog only interrupts the
+	 // person at the machine and blocks the run.  Errors go to the launcher's stderr instead.
 	 char* mnp = getenv("MEDNAFEN_NOPOPUPS");
 
-	 if(mnp)
-	  SuppressErrorPopups = atoi(mnp);
-	 else
-	  SuppressErrorPopups = false;
+	 SuppressErrorPopups = mnp ? atoi(mnp) : true;
 
 #ifdef WIN32
 	 // for assert() and abort()
@@ -2470,7 +2481,7 @@ int main(int argc, char *argv[])
 	   }
 	   else
 	   {
-	    MDFN_Notify(MDFN_NOTICE_ERROR, _("Multiple instances of Mednafen using the same base directory should not run simultaneously, otherwise settings file changes may be lost, along with other similar problems.  If you understand the risks, and want to anyway, run Mednafen with environment variable \"MEDNAFEN_ALLOWMULTI\" set to \"1\" to bypass this check."));
+	    MDFN_Notify(MDFN_NOTICE_ERROR, _("Another Mednafen is already running with base directory \"%s\" (its mednafen.lck is locked).  Give each running Mednafen its own MEDNAFEN_HOME and --automation directory."), MDFN_strhumesc(DrBaseDirectory).c_str());
 	    return -1;
 	   }
 	  }

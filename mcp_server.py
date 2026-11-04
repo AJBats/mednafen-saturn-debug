@@ -263,7 +263,8 @@ async def boot(cue_path: str = "", timeout: int = 45, sound: bool = False) -> st
     deadline = time.time() + timeout
     while time.time() < deadline:
         if _proc.poll() is not None:
-            return f"FAIL: Mednafen exited with code {_proc.returncode}"
+            with open(stderr_f.name) as f:
+                return f"FAIL: Mednafen exited with code {_proc.returncode}: {f.read().strip()}"
         if os.path.exists(_ack_file):
             try:
                 with open(_ack_file) as f:

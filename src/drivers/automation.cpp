@@ -2392,12 +2392,15 @@ void Automation_Init(const std::string& dir)
  frames_to_advance = 0;  // Start PAUSED -- external tool must send "run" or "frame_advance"
  last_action_header.clear();
 
- // Write initial ack so external tools know we're ready
- write_ack("ready frame=0");
-
  fprintf(stderr, "Automation: initialized\n");
  fprintf(stderr, "  Action file: %s\n", action_file.c_str());
  fprintf(stderr, "  Ack file:    %s\n", ack_file.c_str());
+}
+
+void Automation_Ready(void)
+{
+ if (automation_active)
+  write_ack("ready frame=0");
 }
 
 void Automation_Poll(const MDFN_Surface* surface, const MDFN_Rect* rect, const int32* lw)

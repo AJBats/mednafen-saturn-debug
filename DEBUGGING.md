@@ -65,6 +65,13 @@ Key flags:
 - `MEDNAFEN_ALLOWMULTI=1` - allow multiple instances (for parallel comparison)
 - Isolated `HOME` dir avoids lock file conflicts between instances
 
+This fork never opens an error dialog (`MEDNAFEN_NOPOPUPS=0` brings them back).
+Errors and warnings go to the stderr you started it with, so capture that and
+read it when the process exits: a second Mednafen on the same home, or a bad disc
+path, says so there and exits before the `ready` ack, which means the disc has
+loaded. Everything else Mednafen prints goes to `stdout.txt` and `stderr.txt`
+beside the exe, which every instance truncates when it starts.
+
 ### Writing Commands (Python Client)
 
 ```python

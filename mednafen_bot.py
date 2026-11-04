@@ -246,7 +246,8 @@ class MednafenBot:
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self.proc.poll() is not None:
-                print(f"  Mednafen exited with code {self.proc.returncode}")
+                with open(self.stderr_file.name) as f:
+                    print(f"  Mednafen exited with code {self.proc.returncode}: {f.read().strip()}")
                 return False
             if os.path.exists(self.ack_file):
                 try:
