@@ -157,6 +157,104 @@ void SetDrawCosts(uint32 texel, uint32 tex_pixel, uint32 gouraud, uint32 pixel, 
  ExtraCycles16 = 0;
 }
 
+// The wireframe view (SetWireframe): 0 off, 1 each sprite and polygon
+// outlined over the picture, 2 the outlines alone.
+static unsigned WireMode;
+
+void SetWireframe(unsigned mode)
+{
+ WireMode = mode % 3;
+}
+
+unsigned GetWireframe(void)
+{
+ return WireMode;
+}
+
+// The polyline that outlines a sprite or polygon command: its four corners in
+// command coordinates, in a colour picked by its texture address (white when
+// untextured), so commands sharing a texture share a colour. out may be cmd.
+static void WireOutline(const uint16* cmd, uint16* out)
+{
+ static const uint16 colors[8] = { 0x211F, 0x23E8, 0x7E0A, 0x0FFF, 0x7FE6, 0x7D1F, 0x129F, 0x43F4 };
+ const unsigned comm = cmd[0] & 0xF;
+ const uint16 color = (comm == 0x4) ? 0x7FFF : colors[((cmd[0x4] * 0x9E37U) >> 13) & 0x7];
+ int32 x[4], y[4];
+
+ if(comm >= 0x2)
+ {
+  for(unsigned i = 0; i < 4; i++)
+  {
+   x[i] = sign_x_to_s32(13, cmd[0x6 + (i << 1)]);
+   y[i] = sign_x_to_s32(13, cmd[0x7 + (i << 1)]);
+  }
+ }
+ else if(comm == 0x0)
+ {
+  const uint32 w = ((cmd[0x5] >> 8) & 0x3F) << 3;
+  const uint32 h = cmd[0x5] & 0xFF;
+
+  x[0] = x[3] = sign_x_to_s32(13, cmd[0x6]);
+  y[0] = y[1] = sign_x_to_s32(13, cmd[0x7]);
+  x[1] = x[2] = x[0] + (std::max<uint32>(w, 1) - 1);
+  y[2] = y[3] = y[0] + (std::max<uint32>(h, 1) - 1);
+ }
+ else
+ {
+  // Scaled: the corners SpriteBase() derives from the zoom point.
+  const unsigned zp = (cmd[0] >> 8) & 0xF;
+  const int32 disp_w = sign_x_to_s32(13, cmd[0x8]);
+  const int32 disp_h = sign_x_to_s32(13, cmd[0x9]);
+
+  for(unsigned i = 0; i < 4; i++)
+  {
+   x[i] = sign_x_to_s32(13, cmd[0x6]);
+   y[i] = sign_x_to_s32(13, cmd[0x7]);
+  }
+
+  switch(zp >> 2)
+  {
+   case 0x0: y[2] = y[3] = sign_x_to_s32(13, cmd[0xB]); break;
+   case 0x1: y[2] += disp_h; y[3] += disp_h; break;
+   case 0x2: y[0] -= disp_h >> 1; y[1] -= disp_h >> 1; y[2] += (disp_h + 1) >> 1; y[3] += (disp_h + 1) >> 1; break;
+   case 0x3: y[0] -= disp_h; y[1] -= disp_h; break;
+  }
+
+  switch(zp & 0x3)
+  {
+   case 0x0: x[1] = x[2] = sign_x_to_s32(13, cmd[0xA]); break;
+   case 0x1: x[1] += disp_w; x[2] += disp_w; break;
+   case 0x2: x[0] -= disp_w >> 1; x[3] -= disp_w >> 1; x[1] += (disp_w + 1) >> 1; x[2] += (disp_w + 1) >> 1; break;
+   case 0x3: x[0] -= disp_w; x[3] -= disp_w; break;
+  }
+ }
+
+ // Polyline, keeping the jump bits, link and clipping; RGB colour, replace.
+ out[0x0] = (cmd[0x0] & 0xF000) | 0x5;
+ out[0x1] = cmd[0x1];
+ out[0x2] = (cmd[0x2] & 0x0E00) | 0x00E8;
+ out[0x3] = 0x8000 | color;
+ out[0x4] = out[0x5] = 0;
+ for(unsigned i = 0; i < 4; i++)
+ {
+  out[0x6 + (i << 1)] = x[i];
+  out[0x7 + (i << 1)] = y[i];
+ }
+ out[0xE] = out[0xF] = 0;
+}
+
+// Draws a command's outline at once, outside the drawing time model, so the
+// view over the picture leaves the game's timing alone.
+static void WireDraw(const uint16* cmd)
+{
+ uint16 line[0x10];
+
+ WireOutline(cmd, line);
+ CMD_Line(line);
+ while(RESUME_Line(line))
+  ;
+}
+
 static bool vb_status, hb_status;
 static bool vbcdpending;
 static bool FBManualPending;
@@ -808,6 +906,11 @@ static INLINE void DoDrawing(void)
    if(MDFN_UNLIKELY(CostLogging))
     CostLogCommand(CurCommandAddr, CommandData);
 
+   // Outlines alone: sprites and polygons become polylines, which draw
+   // faster than what they replace.
+   if(MDFN_UNLIKELY(WireMode == 2) && !(CommandData[0] & 0xC000) && (CommandData[0] & 0xF) <= 0x4)
+    WireOutline(CommandData, CommandData);
+
    VDP1_EAT_CLOCKS(16);
 
    for(unsigned i = 0; i < 16; i++)
@@ -862,6 +965,9 @@ static INLINE void DoDrawing(void)
 
        VDP1_EAT_CLOCKS(cycles);
       }
+
+      if(MDFN_UNLIKELY(WireMode == 1) && !CostLogging && (CommandData[0] & 0xF) <= 0x4)
+       WireDraw(CommandData);
      }
     }
    }
@@ -977,6 +1083,11 @@ static void StartDrawing(void)
  }
  CommandPhase = 0;
  VRAMUsageStart();
+
+ // Outlines alone start from a transparent framebuffer: games that cover the
+ // whole screen every frame never erase it.
+ if(MDFN_UNLIKELY(WireMode == 2))
+  memset(FB[FBDrawWhich], 0, sizeof(FB[0]));
 
  CycleCounter = VDP1_UpdateTimingGran;
 }

@@ -303,6 +303,19 @@ Guarded by `MDFN_UNLIKELY(memprofile_file != nullptr)`.
 
 Window starts hidden in automation mode. SDL_RaiseWindow is suppressed.
 
+### Debug: VDP1 Wireframe
+
+| Command | Description |
+|---------|-------------|
+| `wireframe <0\|1\|2>` | 0 off, 1 each sprite and polygon outlined over the picture, 2 the outlines alone. Ack: `ok wireframe <mode>` |
+
+In a window, the V key cycles the same three modes (`command.toggle_wireframe` in
+mednafen.cfg). Each outline's colour comes from the command's texture address, so commands
+that share a texture share a colour; untextured polygons are white. Mode 1 draws outside the
+VDP1 timing model, so the game's timing is unchanged. Mode 2 replaces every sprite and polygon
+with a polyline, which draws faster, so VDP1 timing changes. The cost log (`vdp1_cost_log`)
+records no outlines.
+
 ---
 
 ## Python Client Example

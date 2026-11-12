@@ -35,6 +35,10 @@ namespace MDFN_IEN_SS {
  // Logs the next VDP1 plot to a CSV: a row per command and what it cost.
  void Automation_VDP1CostLog(const char* path);
 
+ // The VDP1 wireframe view: 0 off, 1 outlines over the picture, 2 outlines alone.
+ void Automation_SetWireframe(unsigned mode);
+ unsigned Automation_GetWireframe(void);
+
  // CPU hook control
  void Automation_EnableCPUHook(void);
  void Automation_DisableCPUHook(void);

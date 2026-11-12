@@ -112,6 +112,11 @@ void SetDrawCosts(uint32 texel, uint32 tex_pixel, uint32 gouraud, uint32 pixel, 
 // Logs the next plot to a CSV file: a row per command with its words and what
 // it cost (cycles, lines, pixels, texels read, gouraud pixels).
 void StartCostLog(const char* path) MDFN_COLD;
+
+// The wireframe view: 0 off, 1 each sprite and polygon outlined over the
+// picture, 2 the outlines alone (these draw faster, so VDP1 timing changes).
+void SetWireframe(unsigned mode) MDFN_COLD;
+unsigned GetWireframe(void) MDFN_COLD;
 }
 
 }

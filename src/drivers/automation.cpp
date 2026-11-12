@@ -22,6 +22,7 @@
  *   poke <addr> <b0> [b1 ...]    - Write bytes to memory (hex addr, hex bytes). Updates cache.
  *   dump_region <name> <path>  - Dump named region: wram_high wram_low vdp1_vram vdp2_vram vdp2_cram sound_ram
  *   vdp1_cost_log <path>       - Log the next VDP1 plot: a CSV row per command with its cost
+ *   wireframe <0|1|2>          - VDP1 outlines: off, over the picture, alone (the V key cycles them)
  *   dump_vdp2_regs <path>      - Write VDP2 register state to binary file
  *   dump_cycle                 - Report current absolute master cycle count
  *   run_to_cycle <N>           - Run until master cycle count reaches N
@@ -959,6 +960,15 @@ static void process_command(const std::string& line)
    MDFN_IEN_SS::Automation_VDP1CostLog(path.c_str());
    write_ack("ok vdp1_cost_log " + path);
   }
+ }
+ else if (cmd == "wireframe") {
+  // Usage: wireframe <0|1|2>: off, outlines over the picture, outlines alone
+  unsigned mode = 0;
+  iss >> mode;
+  MDFN_IEN_SS::Automation_SetWireframe(mode);
+  char buf[64];
+  snprintf(buf, sizeof(buf), "ok wireframe %u", MDFN_IEN_SS::Automation_GetWireframe());
+  write_ack(buf);
  }
  else if (cmd == "dump_vdp2_regs") {
   std::string path;

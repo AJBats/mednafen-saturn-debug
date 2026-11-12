@@ -1294,6 +1294,16 @@ void Automation_VDP1CostLog(const char* path)
  VDP1::StartCostLog(path);
 }
 
+void Automation_SetWireframe(unsigned mode)
+{
+ VDP1::SetWireframe(mode);
+}
+
+unsigned Automation_GetWireframe(void)
+{
+ return VDP1::GetWireframe();
+}
+
 void Automation_DumpVDP2RegsBin(const char* path)
 {
  VDP2::DumpRawRegsBin(path);

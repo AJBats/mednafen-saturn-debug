@@ -33,6 +33,7 @@
 #include "help.h"
 #include "rmdui.h"
 #include "automation.h"
+#include "../ss/automation_ss.h"
 
 int NoWaiting = 0;
 
@@ -1226,6 +1227,7 @@ enum CommandKey
 	CK_TOGGLE_CHEAT_ACTIVE,
 	CK_TOGGLE_FPS_VIEW,
 	CK_TOGGLE_DEBUGGER,
+	CK_TOGGLE_WIREFRAME,
 	CK_STATE_SLOT_DEC,
         CK_STATE_SLOT_INC,
 	CK_TOGGLE_HELP,
@@ -1355,6 +1357,7 @@ static const COKE CKeys[_CK_COUNT]	=
 	CKEYDEF( "togglecheatactive", "Enable/Disable cheats", 0, MK_CK_ALT(T) ),
         CKEYDEF( "toggle_fps_view", "Toggle frames-per-second display", 0, MK_CK_SHIFT(F1) ),
 	CKEYDEF( "toggle_debugger", "Toggle debugger", CKEYDEF_BYPASSKEYZEROING | CKEYDEF_TEXTINPUTEXIT, MK_CK_ALT(D) ),
+	CKEYDEF( "toggle_wireframe", "Cycle the Saturn VDP1 wireframe view: off, over the picture, outlines alone", 0, MK_CK(V) ),
 	CKEYDEF( "state_slot_dec", "Decrease selected save state slot by 1", 0, MK_CK(MINUS) ),
 	CKEYDEF( "state_slot_inc", "Increase selected save state slot by 1", 0, MK_CK(EQUALS) ),
 	CKEYDEF( "toggle_help", "Toggle help screen", CKEYDEF_BYPASSKEYZEROING, MK_CK(F1) ),
@@ -1774,6 +1777,13 @@ static void CheckCommandKeys(void)
 
   if(CK_Check(CK_TOGGLE_FPS_VIEW))
    FPS_ToggleView();
+
+  if(CK_Check(CK_TOGGLE_WIREFRAME))
+  {
+   static const char* const names[3] = { "Off", "Over the picture", "Outlines alone" };
+   MDFN_IEN_SS::Automation_SetWireframe(MDFN_IEN_SS::Automation_GetWireframe() + 1);
+   MDFN_Notify(MDFN_NOTICE_STATUS, _("Wireframe: %s"), names[MDFN_IEN_SS::Automation_GetWireframe()]);
+  }
 
   if(CK_Check(CK_TOGGLE_FS)) 
   {
