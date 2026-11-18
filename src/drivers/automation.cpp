@@ -10,7 +10,15 @@
  *   screenshot <path>          - Save cached framebuffer to PNG (no frame advance, no PC movement)
  *   input <button>             - Press button (START, A, B, C, X, Y, Z, UP, DOWN, LEFT, RIGHT, L, R)
  *   input_release <button>     - Release button
- *   input_clear                - Release all buttons
+ *   input_clear                - Release all buttons, and port 1's analog axes
+ *                                (buttons land in the right bits for the control
+ *                                pad, the 3D pad and the Arcade Racer wheel; on the
+ *                                3D pad L and R pull the analog shoulders fully)
+ *   analog [P2_]<axis> <0-255> - Hold an analog axis at a value, in the units the
+ *                                game reads: X / Y the 3D pad's stick (128 centered)
+ *                                or the wheel's turn (X, 1-254); L / R the 3D pad's
+ *                                analog shoulders (0 released, 255 full)
+ *   analog_release [P2_]<axis|ALL> - Give an axis back to the keyboard/joystick
  *   run_to_frame <N>           - Run until frame N then pause
  *   quit                       - Clean shutdown
  *   dump_regs                  - Dump SH-2 master CPU registers (text: 23 values incl MACL)
@@ -80,7 +88,9 @@
  *   cdb_trace_stop             - Stop CD Block trace
  *   input_trace <path>         - Log real keyboard button presses/releases with frame numbers
  *   input_trace_stop           - Stop input trace logging
- *   input_playback <path>      - Replay recorded input trace (events injected at correct frames)
+ *   input_playback <path>      - Replay recorded input trace (events injected at correct frames;
+ *                                lines "frame=N PRESS|RELEASE [P2_]BUTTON" and
+ *                                "frame=N ANALOG [P2_]AXIS <0-255|OFF>")
  *   input_playback_stop        - Stop input playback
  *   call_stack [scan_size]     - Heuristic SH-2 call stack (scans stack for return addresses)
  *   watchpoint <addr> [eq <val>] [log] - Break on memory write to addr (hex), reports PC+old+new value
@@ -221,6 +231,26 @@ static bool input_override = false;
 // Port 2's, from input playback only (traces record both ports).
 static uint16_t input_buttons2 = 0;
 static bool input_override2 = false;
+
+// Analog axes per port, held at a value in the units the game reads: X and Y
+// the 3D pad's stick (0-255, 128 centered), or the wheel's turn (X, 1-254);
+// L and R the 3D pad's analog shoulders (0 released, 255 full). -1 leaves the
+// axis to the keyboard/joystick. Unlike the buttons these replace the port's
+// value instead of ORing into it.
+enum { AX_X = 0, AX_Y, AX_L, AX_R, AX_COUNT };
+static int analog_axes[2][AX_COUNT] = { { -1, -1, -1, -1 }, { -1, -1, -1, -1 } };
+
+// The devices whose input data Automation_GetInput knows.
+enum { DEV_PAD = 0, DEV_3DPAD, DEV_WHEEL };
+
+// The buttons are kept in the control pad's bit order (BTN_*); these give each
+// one's bit in the other devices' input data (src/ss/input/3dpad.cpp and
+// wheel.cpp IDII), -1 where the device has no such button. The 3D pad's L and
+// R are its analog shoulders, handled apart.
+static const int pad3d_bit[16] = {
+ 8, 9, 10, -1,  0, 1, 2, 3,  4, 5, 6, 7,  -1, -1, -1, -1 };
+static const int wheel_bit[16] = {
+ 8, 9, 10, -1,  0, 1, -1, -1,  4, 5, 6, 7,  -1, -1, -1, -1 };
 
 // Cached framebuffer for instant screenshots (no frame advance needed).
 // Updated every frame in Automation_Poll with a full copy of the pixel data.
@@ -581,6 +611,7 @@ static uint32_t poke_playback_halt_pc = 0;
 static FILE* input_trace_file = nullptr;
 static uint16_t last_traced_input = 0;
 static uint16_t last_traced_input2 = 0; // port 2, logged with a P2_ prefix
+static int last_traced_axes[2][AX_COUNT] = { { -1, -1, -1, -1 }, { -1, -1, -1, -1 } };
 
 // Input playback state -- replays recorded input traces.
 // Events are loaded into a vector on input_playback <path>.
@@ -588,8 +619,10 @@ static uint16_t last_traced_input2 = 0; // port 2, logged with a P2_ prefix
 struct InputEvent {
  uint64_t frame;
  bool press;     // true=press, false=release
- int button;     // BTN_* enum value
+ int button;     // BTN_* enum value, or -1 for an analog event
  int port;       // 0, or 1 for port 2 (P2_ names)
+ int axis;       // AX_*, for an analog event
+ int value;      // the axis's value, -1 to release it
 };
 static std::vector<InputEvent> playback_events;
 static size_t playback_index = 0;        // next event to process
@@ -675,6 +708,29 @@ static int parse_button(const char* name)
  if (eq(name, "LEFT")) return BTN_LEFT;
  if (eq(name, "RIGHT")) return BTN_RIGHT;
  return -1;
+}
+
+static int parse_axis(const char* name)
+{
+ switch (toupper((unsigned char)name[0])) {
+  case 'X': return name[1] ? -1 : AX_X;
+  case 'Y': return name[1] ? -1 : AX_Y;
+  case 'L': return name[1] ? -1 : AX_L;
+  case 'R': return name[1] ? -1 : AX_R;
+ }
+ return -1;
+}
+
+static const char* const axis_names[AX_COUNT] = { "X", "Y", "L", "R" };
+
+// "P2_" in front of a button or axis name: port 2. Strips it.
+static int parse_port(const char*& name)
+{
+ if (strncmp(name, "P2_", 3) == 0 || strncmp(name, "p2_", 3) == 0) {
+  name += 3;
+  return 1;
+ }
+ return 0;
 }
 
 static void dump_registers(void)
@@ -793,7 +849,41 @@ static void process_command(const std::string& line)
  else if (cmd == "input_clear") {
   input_buttons = 0;
   input_override = false;
+  for (int a = 0; a < AX_COUNT; a++)
+   analog_axes[0][a] = -1;
   write_ack("ok input_clear");
+ }
+ else if (cmd == "analog") {
+  std::string name;
+  int value = -1;
+  iss >> name >> value;
+  const char* n = name.c_str();
+  const int port = parse_port(n);
+  const int a = parse_axis(n);
+  if (a < 0) {
+   write_ack("error analog: unknown axis " + name);
+  } else if (value < 0 || value > 255) {
+   write_ack("error analog: value must be 0-255");
+  } else {
+   analog_axes[port][a] = value;
+   write_ack("ok analog " + name + " " + std::to_string(value));
+  }
+ }
+ else if (cmd == "analog_release") {
+  std::string name;
+  iss >> name;
+  const char* n = name.c_str();
+  const int port = parse_port(n);
+  const bool all = (strcmp(n, "ALL") == 0 || strcmp(n, "all") == 0);
+  const int a = all ? -1 : parse_axis(n);
+  if (!all && a < 0) {
+   write_ack("error analog_release: unknown axis " + name);
+  } else {
+   for (int i = 0; i < AX_COUNT; i++)
+    if (all || i == a)
+     analog_axes[port][i] = -1;
+   write_ack("ok analog_release " + name);
+  }
  }
  else if (cmd == "run_to_frame") {
   int64_t n = 0;
@@ -1404,9 +1494,12 @@ static void process_command(const std::string& line)
    if (input_trace_file) fclose(input_trace_file);
    input_trace_file = fopen(path.c_str(), "w");
    if (input_trace_file) {
-    fprintf(input_trace_file, "# Input trace -- frame PRESS/RELEASE BUTTON (P2_ for port 2)\n");
+    fprintf(input_trace_file, "# Input trace -- frame PRESS/RELEASE BUTTON, frame ANALOG AXIS VALUE (P2_ for port 2)\n");
     last_traced_input = 0;
     last_traced_input2 = 0;
+    for (int p = 0; p < 2; p++)
+     for (int a = 0; a < AX_COUNT; a++)
+      last_traced_axes[p][a] = -1;
     write_ack("ok input_trace " + path);
    } else {
     write_ack("error input_trace: cannot open " + path);
@@ -1434,19 +1527,29 @@ static void process_command(const std::string& line)
     playback_index = 0;
     char line[256];
     while (fgets(line, sizeof(line), f)) {
-     // Parse: frame=N PRESS/RELEASE BUTTON
+     // Parse: frame=N PRESS/RELEASE BUTTON, or frame=N ANALOG AXIS VALUE|OFF
      uint64_t fr = 0;
-     char action[32] = {0}, button[32] = {0};
-     if (sscanf(line, "frame=%llu %31s %31s", (unsigned long long*)&fr, action, button) == 3) {
-      int port = (strncmp(button, "P2_", 3) == 0) ? 1 : 0;
-      int b = parse_button(button + port * 3);
-      if (b >= 0) {
-       InputEvent ev;
-       ev.frame = fr;
+     char action[32] = {0}, button[32] = {0}, value[32] = {0};
+     if (sscanf(line, "frame=%llu %31s %31s %31s", (unsigned long long*)&fr, action, button, value) >= 3) {
+      const char* name = button;
+      InputEvent ev;
+      ev.frame = fr;
+      ev.port = parse_port(name);
+      ev.press = false;
+      ev.axis = -1;
+      ev.value = -1;
+      if (strcmp(action, "ANALOG") == 0) {
+       ev.button = -1;
+       ev.axis = parse_axis(name);
+       if (value[0] && strcmp(value, "OFF") != 0)
+        ev.value = atoi(value);
+       if (ev.axis >= 0 && ev.value <= 255)
+        playback_events.push_back(ev);
+      } else {
+       ev.button = parse_button(name);
        ev.press = (strcmp(action, "PRESS") == 0);
-       ev.button = b;
-       ev.port = port;
-       playback_events.push_back(ev);
+       if (ev.button >= 0)
+        playback_events.push_back(ev);
       }
      }
     }
@@ -1456,6 +1559,9 @@ static void process_command(const std::string& line)
     input_override = false;
     input_buttons2 = 0;
     input_override2 = false;
+    for (int p = 0; p < 2; p++)
+     for (int a = 0; a < AX_COUNT; a++)
+      analog_axes[p][a] = -1;
     playback_base_frame = frame_counter;
     playback_active = true;
     char buf[256];
@@ -2456,13 +2562,17 @@ void Automation_Poll(const MDFN_Surface* surface, const MDFN_Rect* rect, const i
   while (playback_index < playback_events.size()
          && playback_events[playback_index].frame <= rel_frame) {
    const auto& ev = playback_events[playback_index];
-   uint16_t& buttons = ev.port ? input_buttons2 : input_buttons;
-   if (ev.press) {
-    buttons |= (1 << ev.button);
+   if (ev.button < 0) {
+    analog_axes[ev.port][ev.axis] = ev.value;
    } else {
-    buttons &= ~(1 << ev.button);
+    uint16_t& buttons = ev.port ? input_buttons2 : input_buttons;
+    if (ev.press) {
+     buttons |= (1 << ev.button);
+    } else {
+     buttons &= ~(1 << ev.button);
+    }
+    (ev.port ? input_override2 : input_override) = true;
    }
-   (ev.port ? input_override2 : input_override) = true;
    playback_index++;
   }
   // Auto-stop when all events consumed
@@ -2607,7 +2717,37 @@ void Automation_LogSystemCommand(const char* cmd_name)
  fflush(input_trace_file);
 }
 
-bool Automation_GetInput(unsigned port, uint8_t* data, unsigned data_size)
+static unsigned get16(const uint8_t* p) { return p[0] | (p[1] << 8); }
+static void put16(uint8_t* p, unsigned v) { p[0] = v & 0xFF; p[1] = (v >> 8) & 0xFF; }
+
+// Saturn units (what the game reads) to the port's 16-bit axis data and back,
+// inverting the devices' UpdateInput: the 3D pad's (src/ss/input/3dpad.cpp)
+// value = (data * 255 + 32767) / 65535, the stick's centre snapped to 32768;
+// the wheel's (wheel.cpp) value = 1 + data * 253 / 65534.
+static unsigned pad3d_raw(int v) { return (unsigned)v * 257; }
+static int pad3d_value(unsigned raw, bool stick)
+{
+ if (stick && raw >= 32768 - 128 && raw < 32768)
+  raw = 32768;
+ return (int)((raw * 255 + 32767) / 65535);
+}
+static unsigned wheel_raw(int v)
+{
+ v = v < 1 ? 1 : v > 254 ? 254 : v;
+ return ((unsigned)(v - 1) * 65534 + 252) / 253;
+}
+static int wheel_value(unsigned raw) { return 1 + (int)(raw * 253 / 65534); }
+
+static int device_kind(const char* device, unsigned data_size)
+{
+ if (device && strcmp(device, "3dpad") == 0 && data_size >= 10)
+  return DEV_3DPAD;
+ if (device && strcmp(device, "wheel") == 0 && data_size >= 4)
+  return DEV_WHEEL;
+ return DEV_PAD;
+}
+
+bool Automation_GetInput(unsigned port, uint8_t* data, unsigned data_size, const char* device)
 {
  if (port > 1)
   return false;
@@ -2615,19 +2755,72 @@ bool Automation_GetInput(unsigned port, uint8_t* data, unsigned data_size)
  // OR automation button presses into the existing data.
  // NOTE: This is additive -- real keyboard input is NOT suppressed.
  // Both automation and keyboard presses contribute to the final state.
+ // Held analog axes replace the port's value.
  const bool override = port ? input_override2 : input_override;
  const uint16_t buttons = port ? input_buttons2 : input_buttons;
+ const int* axes = analog_axes[port];
+ const bool analog = axes[AX_X] >= 0 || axes[AX_Y] >= 0 || axes[AX_L] >= 0 || axes[AX_R] >= 0;
+ const int kind = device_kind(device, data_size);
+ const int* bit_of = kind == DEV_3DPAD ? pad3d_bit : kind == DEV_WHEEL ? wheel_bit : nullptr;
+
  if (automation_active && override && data_size >= 2) {
-  data[0] |= (uint8_t)(buttons & 0xFF);
-  data[1] |= (uint8_t)((buttons >> 8) & 0xFF);
+  uint16_t bits = buttons;
+  if (bit_of) {
+   bits = 0;
+   for (int b = 0; b < 16; b++)
+    if ((buttons & (1 << b)) && bit_of[b] >= 0)
+     bits |= 1 << bit_of[b];
+  }
+  data[0] |= (uint8_t)(bits & 0xFF);
+  data[1] |= (uint8_t)((bits >> 8) & 0xFF);
+  if (kind == DEV_3DPAD) {                    // L and R: a full pull of the shoulder
+   if (buttons & (1 << BTN_R)) put16(&data[6], 65535);
+   if (buttons & (1 << BTN_L)) put16(&data[8], 65535);
+  }
+ }
+ if (automation_active && analog) {
+  if (kind == DEV_3DPAD) {
+   static const int at[AX_COUNT] = { 2, 4, 8, 6 };   // X, Y, L (left shoulder), R
+   for (int a = 0; a < AX_COUNT; a++)
+    if (axes[a] >= 0)
+     put16(&data[at[a]], pad3d_raw(axes[a]));
+  } else if (kind == DEV_WHEEL && axes[AX_X] >= 0) {
+   put16(&data[2], wheel_raw(axes[AX_X]));
+  }
  }
 
  // Input tracing: log combined button state (keyboard + automation) AFTER override.
  // This captures the full input picture — what the game actually sees, on
- // both ports (port 2's names prefixed P2_).
+ // both ports (port 2's names prefixed P2_), the buttons in the control pad's
+ // names and the analog axes in the game's units, so a trace plays back.
  uint16_t& last_traced = port ? last_traced_input2 : last_traced_input;
  if (automation_active && input_trace_file && data_size >= 2) {
   uint16_t cur = data[0] | ((uint16_t)data[1] << 8);
+  int now[AX_COUNT] = { -1, -1, -1, -1 };
+  if (bit_of) {
+   uint16_t raw = cur;
+   cur = 0;
+   for (int b = 0; b < 16; b++)
+    if (bit_of[b] >= 0 && (raw & (1 << bit_of[b])))
+     cur |= 1 << b;
+   if (kind == DEV_3DPAD) {
+    now[AX_X] = pad3d_value(get16(&data[2]), true);
+    now[AX_Y] = pad3d_value(get16(&data[4]), true);
+    now[AX_L] = pad3d_value(get16(&data[8]), false);
+    now[AX_R] = pad3d_value(get16(&data[6]), false);
+   } else {
+    now[AX_X] = wheel_value(get16(&data[2]));
+   }
+  }
+  int* last_axes = last_traced_axes[port];
+  for (int a = 0; a < AX_COUNT; a++) {
+   if (now[a] >= 0 && now[a] != last_axes[a]) {
+    fprintf(input_trace_file, "frame=%llu ANALOG %s%s %d\n",
+     (unsigned long long)frame_counter, port ? "P2_" : "", axis_names[a], now[a]);
+    last_axes[a] = now[a];
+    fflush(input_trace_file);
+   }
+  }
   if (cur != last_traced) {
    static const struct { int bit; const char* name; } btn_names[] = {
     {BTN_Z, "Z"}, {BTN_Y, "Y"}, {BTN_X, "X"}, {BTN_R, "R"},
@@ -2650,7 +2843,7 @@ bool Automation_GetInput(unsigned port, uint8_t* data, unsigned data_size)
   }
  }
 
- return (automation_active && override);
+ return (automation_active && (override || analog));
 }
 
 bool Automation_ConsumePendingShowWindow(void)

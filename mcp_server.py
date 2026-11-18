@@ -396,6 +396,23 @@ async def input_clear() -> str:
 
 
 @mcp.tool()
+async def input_analog(axis: str, value: int = -1) -> str:
+    """Hold an analog axis at a value, in the units the game reads, until
+    released (value -1). Axes: X, Y (the 3D pad's stick, 128 centered; X is
+    also the Arcade Racer wheel's turn, 1-254), L, R (the 3D pad's analog
+    shoulders, 0 released to 255 full). Prefix P2_ for port 2. The port's
+    device must be the 3D pad (in analog mode) or the wheel.
+    """
+    if not _alive():
+        return "FAIL: No session"
+    if value < 0:
+        ack = await _send_and_wait(f"analog_release {axis}", "ok analog_release", timeout=5)
+        return f"OK: Released {axis}" if ack else f"FAIL: analog_release {axis}"
+    ack = await _send_and_wait(f"analog {axis} {value}", "ok analog", timeout=5)
+    return f"OK: {axis} held at {value}" if ack else f"FAIL: analog {axis} {value}"
+
+
+@mcp.tool()
 async def input_tap(button: str, hold_frames: int = 5) -> str:
     """Press a button for N frames then release. Convenience for menu navigation."""
     global _frame

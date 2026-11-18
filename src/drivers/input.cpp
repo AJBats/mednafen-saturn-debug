@@ -2358,8 +2358,8 @@ void Input_Update(bool VirtualDevicesOnly, bool UpdateRapidFire)
     PIDC[x].Data[i] = (PIDC[x].Data[i] & andptr[i]) | orptr[i];
   }
 
-  // Automation input override: OR in automation button presses
-  Automation_GetInput(x, PIDC[x].Data, PIDC[x].Device->IDII.InputByteSize);
+  // Automation input override: OR in automation button presses, set held axes
+  Automation_GetInput(x, PIDC[x].Data, PIDC[x].Device->IDII.InputByteSize, PIDC[x].Device->ShortName);
  }
 
  memset(BarcodeWorldData, 0, sizeof(BarcodeWorldData));

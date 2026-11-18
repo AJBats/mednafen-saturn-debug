@@ -36,8 +36,10 @@ bool Automation_IsActive(void);
 bool Automation_SuppressRaise(void);
 
 // Check if automation wants to override input for a port.
-// Automation input is ORed into existing keyboard state (additive, not exclusive).
-bool Automation_GetInput(unsigned port, uint8_t* data, unsigned data_size);
+// Automation input is ORed into existing keyboard state (additive, not exclusive);
+// held analog axes replace the port's. device: the port's device ShortName
+// ("gamepad", "3dpad", "wheel", ...), which decides where the buttons go.
+bool Automation_GetInput(unsigned port, uint8_t* data, unsigned data_size, const char* device);
 
 // Debug hook called from SH-2 step (master CPU only).
 // Checks breakpoints, steps, cycle targets. Spin-waits when paused.
